@@ -455,10 +455,6 @@
         function renderAfterAnswerChange(questionIdx) {
             state.idx = questionIdx;
             renderQuestion();
-            if (isPullNavMode()) {
-                const card = getQuestionCardElement(questionIdx);
-                if (card) card.scrollIntoView({ block: 'start' });
-            }
         }
 
         function commitAnswer(questionIdx, answerValue, renderNow = true) {
