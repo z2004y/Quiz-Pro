@@ -2,6 +2,11 @@
         const API_BASE_URL = (document.body?.dataset?.apiBase || '/api').replace(/\/+$/, '') || '/api';
         const darkModeMedia = window.matchMedia('(prefers-color-scheme: dark)');
         const THEME_STORAGE_KEY = 'quiz_theme_preference';
+        const QUESTION_FONT_STORAGE_KEY = 'quiz_question_font_percent';
+        const QUESTION_COMPACTNESS_STORAGE_KEY = 'quiz_question_compactness_level';
+        const DEFAULT_QUESTION_FONT_PERCENT = 100;
+        const DEFAULT_COMPACTNESS_LEVEL = 3;
+        const COMPACTNESS_LABELS = ['舒展', '标准', '紧凑', '极限'];
         let toastTimer = null;
         const $ = id => document.getElementById(id);
         const escapeHtml = (value) => String(value ?? '')
@@ -34,6 +39,26 @@
             const normalized = value === 'dark' || value === 'light' ? value : 'auto';
             document.body.dataset.themePreference = normalized;
             localStorage.setItem(THEME_STORAGE_KEY, normalized);
+        }
+
+        function clampQuestionFontPercent(value) {
+            const numericValue = Number(value);
+            const safeValue = Number.isFinite(numericValue) ? numericValue : DEFAULT_QUESTION_FONT_PERCENT;
+            return Math.max(85, Math.min(140, safeValue));
+        }
+
+        function clampCompactnessLevel(value) {
+            const numericValue = Number(value);
+            const safeValue = Number.isFinite(numericValue) ? numericValue : DEFAULT_COMPACTNESS_LEVEL;
+            return Math.max(0, Math.min(3, Math.round(safeValue)));
+        }
+
+        function getStoredQuestionFontPercent() {
+            return clampQuestionFontPercent(localStorage.getItem(QUESTION_FONT_STORAGE_KEY));
+        }
+
+        function getStoredCompactnessLevel() {
+            return clampCompactnessLevel(localStorage.getItem(QUESTION_COMPACTNESS_STORAGE_KEY));
         }
 
         function isDarkThemeActive() {
@@ -127,7 +152,7 @@
             }
         }
 
-        let state = { lib: null, mode: '', idx: 0, answers: {}, pendingAnswers: {}, wrongAttempts: {}, timer: null, timeLeft: 600, isReview: false, practiceHints: {}, submitting: false, navMode: 'next', pendingExamModeSwitch: false, questionFontScale: 1 };
+        let state = { lib: null, mode: '', idx: 0, answers: {}, pendingAnswers: {}, wrongAttempts: {}, timer: null, timeLeft: 600, isReview: false, practiceHints: {}, submitting: false, navMode: 'next', pendingExamModeSwitch: false, questionFontScale: getStoredQuestionFontPercent() / 100, compactnessLevel: getStoredCompactnessLevel() };
         let confirmResolver = null;
         const MODE_SWITCHABLE = ['browse', 'practice', 'analysis', 'exam'];
 
@@ -145,9 +170,29 @@
             if (panel) panel.classList.add('hidden');
         }
 
+        function rerenderQuestionWithLayoutUpdate() {
+            if (!state.lib || !state.mode) return;
+            const currentQuestionIndex = state.idx;
+            renderQuestion();
+            if (isPullNavMode()) {
+                requestAnimationFrame(() => {
+                    const card = getQuestionCardElement(currentQuestionIndex);
+                    if (card) card.scrollIntoView({ block: 'start' });
+                });
+            }
+        }
+
         function getQuestionFontPercent() {
             const raw = Math.round((Number(state.questionFontScale) || 1) * 100);
-            return Math.max(85, Math.min(140, raw));
+            return clampQuestionFontPercent(raw);
+        }
+
+        function getCompactnessLevel() {
+            return clampCompactnessLevel(state.compactnessLevel);
+        }
+
+        function getCompactnessLabel(level = getCompactnessLevel()) {
+            return COMPACTNESS_LABELS[level] || COMPACTNESS_LABELS[DEFAULT_COMPACTNESS_LEVEL];
         }
 
         function updateQuestionFontSizePreview() {
@@ -162,19 +207,32 @@
             if (valueTag) valueTag.innerText = `${percent}%`;
         }
 
-        function setQuestionFontScaleFromPercent(percent, shouldRender = false) {
-            const normalizedPercent = Math.max(85, Math.min(140, Number(percent) || 100));
-            state.questionFontScale = normalizedPercent / 100;
-            updateQuestionFontSizePreview();
-            if (!shouldRender || !state.lib || !state.mode) return;
-            const currentQuestionIndex = state.idx;
-            renderQuestion();
-            if (isPullNavMode()) {
-                requestAnimationFrame(() => {
-                    const card = getQuestionCardElement(currentQuestionIndex);
-                    if (card) card.scrollIntoView({ block: 'start' });
-                });
+        function updateCompactnessPreview() {
+            const slider = $('question-density');
+            const valueTag = $('compactness-value');
+            const level = getCompactnessLevel();
+            if (slider && Number(slider.value) !== level) {
+                slider.value = String(level);
             }
+            if (valueTag) valueTag.innerText = getCompactnessLabel(level);
+        }
+
+        function setQuestionFontScaleFromPercent(percent, shouldRender = false) {
+            const normalizedPercent = clampQuestionFontPercent(percent);
+            state.questionFontScale = normalizedPercent / 100;
+            localStorage.setItem(QUESTION_FONT_STORAGE_KEY, String(normalizedPercent));
+            updateQuestionFontSizePreview();
+            if (!shouldRender) return;
+            rerenderQuestionWithLayoutUpdate();
+        }
+
+        function setCompactnessLevel(level, shouldRender = false) {
+            const normalizedLevel = clampCompactnessLevel(level);
+            state.compactnessLevel = normalizedLevel;
+            localStorage.setItem(QUESTION_COMPACTNESS_STORAGE_KEY, String(normalizedLevel));
+            updateCompactnessPreview();
+            if (!shouldRender) return;
+            rerenderQuestionWithLayoutUpdate();
         }
 
         function updateModeSwitchUI() {
@@ -198,6 +256,7 @@
 
             label.innerText = state.mode;
             updateQuestionFontSizePreview();
+            updateCompactnessPreview();
             const inPullMode = isPullNavMode();
             const navTitle = inPullMode ? '切换到下一题模式' : '切换到连续滚动模式';
             if (navToggle) {
@@ -226,6 +285,85 @@
             if (!state.lib || !state.mode) return '';
             const scale = Math.max(0.85, Math.min(1.4, Number(state.questionFontScale) || 1));
             return ` style="font-size:${scale}em;"`;
+        }
+
+        const COMPACTNESS_PRESETS = [
+            {
+                optionsWrap: 'space-y-3',
+                optionCard: 'option-card p-4 flex items-center font-bold leading-normal text-slate-600',
+                optionTag: 'w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center mr-3 font-black text-slate-400 shrink-0',
+                questionCard: 'quiz-panel bg-white/95 rounded-[2.3rem] p-5 md:p-8 shadow-lg border border-slate-200/70',
+                questionHeader: 'flex items-start gap-3 mb-6',
+                questionIndex: 'text-slate-400 font-black leading-none mt-1',
+                questionTitle: 'text-xl md:text-2xl font-bold text-slate-800 leading-snug',
+                questionTypeTag: 'inline-flex items-center ml-2 px-2 py-1 rounded-md text-xs font-bold bg-slate-100 text-slate-500 align-middle',
+                hintButton: 'mt-5 w-full py-3 bg-indigo-50 text-indigo-600 rounded-2xl font-bold',
+                analysisCard: 'analysis-card mt-5 p-4 bg-slate-50 rounded-2xl border-l-8 border-indigo-600 animate__animated animate__fadeInUp',
+                analysisAnswer: 'font-black text-indigo-600 mb-2',
+                analysisText: 'leading-relaxed text-slate-600 font-medium',
+                cardsWrap: 'space-y-4',
+                footer: 'flex justify-between items-center gap-3 mt-8 pt-6 border-t pb-safe',
+                prevButton: 'font-bold text-slate-400 hover:text-slate-900 disabled:opacity-0 py-2 px-4 transition-all',
+                nextButton: 'px-9 py-3 bg-slate-900 text-white rounded-2xl font-bold shadow-xl active:scale-95 transition-transform'
+            },
+            {
+                optionsWrap: 'space-y-2.5',
+                optionCard: 'option-card p-3.5 flex items-center font-bold leading-snug text-slate-600',
+                optionTag: 'w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center mr-3 font-black text-slate-400 shrink-0',
+                questionCard: 'quiz-panel bg-white/95 rounded-[2.1rem] p-4 md:p-7 shadow-lg border border-slate-200/70',
+                questionHeader: 'flex items-start gap-2.5 mb-5',
+                questionIndex: 'text-slate-400 font-black leading-none mt-0.5',
+                questionTitle: 'text-xl md:text-2xl font-bold text-slate-800 leading-snug',
+                questionTypeTag: 'inline-flex items-center ml-2 px-2 py-0.5 rounded-md text-xs font-bold bg-slate-100 text-slate-500 align-middle',
+                hintButton: 'mt-4 w-full py-3 bg-indigo-50 text-indigo-600 rounded-2xl font-bold',
+                analysisCard: 'analysis-card mt-4 p-4 bg-slate-50 rounded-xl border-l-8 border-indigo-600 animate__animated animate__fadeInUp',
+                analysisAnswer: 'font-black text-indigo-600 mb-2',
+                analysisText: 'leading-relaxed text-slate-600 font-medium',
+                cardsWrap: 'space-y-3',
+                footer: 'flex justify-between items-center gap-3 mt-6 pt-5 border-t pb-safe',
+                prevButton: 'font-bold text-slate-400 hover:text-slate-900 disabled:opacity-0 py-2 px-4 transition-all text-sm',
+                nextButton: 'px-8 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform text-sm'
+            },
+            {
+                optionsWrap: 'space-y-2',
+                optionCard: 'option-card p-3 flex items-center font-bold leading-snug text-slate-600',
+                optionTag: 'w-7 h-7 rounded-md bg-slate-100 flex items-center justify-center mr-2.5 font-black text-slate-400 shrink-0',
+                questionCard: 'quiz-panel bg-white/95 rounded-[1.8rem] p-3.5 md:p-6 shadow-lg border border-slate-200/70',
+                questionHeader: 'flex items-start gap-2.5 mb-4',
+                questionIndex: 'text-slate-400 font-black leading-none mt-0.5',
+                questionTitle: 'text-lg md:text-xl font-bold text-slate-800 leading-snug',
+                questionTypeTag: 'inline-flex items-center ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 align-middle',
+                hintButton: 'mt-3 w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl font-bold',
+                analysisCard: 'analysis-card mt-3 p-3.5 bg-slate-50 rounded-xl border-l-4 border-indigo-600 animate__animated animate__fadeInUp',
+                analysisAnswer: 'font-black text-indigo-600 mb-1.5',
+                analysisText: 'leading-snug text-slate-600 font-medium',
+                cardsWrap: 'space-y-2.5',
+                footer: 'flex justify-between items-center gap-2.5 mt-5 pt-4 border-t pb-safe',
+                prevButton: 'font-bold text-slate-400 hover:text-slate-900 disabled:opacity-0 py-1.5 px-3 transition-all',
+                nextButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform'
+            },
+            {
+                optionsWrap: 'space-y-1.5',
+                optionCard: 'option-card p-2.5 flex items-center font-bold leading-tight text-slate-600',
+                optionTag: 'w-6 h-6 rounded-md bg-slate-100 flex items-center justify-center mr-2 font-black text-slate-400 shrink-0',
+                questionCard: 'quiz-panel bg-white/95 rounded-[1.5rem] p-3 md:p-5 shadow-lg border border-slate-200/70',
+                questionHeader: 'flex items-start gap-2 mb-3',
+                questionIndex: 'text-slate-400 font-black leading-none mt-0.5',
+                questionTitle: 'text-lg md:text-xl font-bold text-slate-800 leading-snug',
+                questionTypeTag: 'inline-flex items-center ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 align-middle',
+                hintButton: 'mt-3 w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl font-bold',
+                analysisCard: 'analysis-card mt-3 p-3 bg-slate-50 rounded-xl border-l-4 border-indigo-600 animate__animated animate__fadeInUp',
+                analysisAnswer: 'font-black text-indigo-600 mb-1.5',
+                analysisText: 'leading-snug text-slate-600 font-medium',
+                cardsWrap: 'space-y-2',
+                footer: 'flex justify-between items-center gap-2 mt-4 pt-4 border-t pb-safe',
+                prevButton: 'font-bold text-slate-400 hover:text-slate-900 disabled:opacity-0 py-1.5 px-3 transition-all',
+                nextButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform'
+            }
+        ];
+
+        function getCompactnessPreset() {
+            return COMPACTNESS_PRESETS[getCompactnessLevel()] || COMPACTNESS_PRESETS[DEFAULT_COMPACTNESS_LEVEL];
         }
 
         function getQuestionType(question) {
@@ -678,6 +816,7 @@
 
         function renderContinuousQuestions() {
             const isAnalysisMode = state.mode === 'analysis';
+            const compact = getCompactnessPreset();
 
             const cards = state.lib.questions.map((q, qIdx) => {
                 const qType = getQuestionType(q);
@@ -695,7 +834,7 @@
                 const selectedMulti = new Set(parseMultipleAnswerValue(currentAnswer));
                 const correctMulti = new Set(parseMultipleAnswerValue(q.ans));
                 const optionsHtml = (q.options || []).map((opt, i) => {
-                    let cls = "option-card p-5 flex items-center font-bold text-slate-600";
+                    let cls = compact.optionCard;
                     if (qType === 'multiple') {
                         const isCorrectOption = correctMulti.has(i);
                         const isSelectedOption = selectedMulti.has(i);
@@ -719,28 +858,28 @@
                     }
                     if (isLockedAfterAnswer) cls += " cursor-default";
                     return `<div onclick="handleChoice(${i}, ${qIdx})" class="${cls}">
-                                <span class="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center mr-4 text-xs font-black text-slate-400 shrink-0">${String.fromCharCode(65+i)}</span>
+                                <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
                                 ${opt}
                             </div>`;
                 }).join('');
-                const contentHtml = `<div class="space-y-4"${getQuestionScaleStyle()}>${optionsHtml}</div>`;
+                const contentHtml = `<div class="${compact.optionsWrap}"${getQuestionScaleStyle()}>${optionsHtml}</div>`;
 
                 let cardHtml = `
-                    <article id="question-card-${qIdx}" data-question-card="${qIdx}" class="quiz-panel bg-white/95 rounded-[2.2rem] p-6 md:p-10 shadow-lg border border-slate-200/70">
-                        <div class="flex items-start gap-3 mb-8">
-                            <span class="text-slate-400 font-black leading-none mt-1"${getQuestionScaleStyle()}>${qIdx + 1}.</span>
-                            <h2 class="text-2xl font-bold text-slate-800 leading-snug"${getQuestionScaleStyle()}>${q.q}<span class="inline-flex items-center ml-2 px-2 py-1 rounded-md text-xs font-bold bg-slate-100 text-slate-500 align-middle">${qTypeLabel}</span></h2>
+                    <article id="question-card-${qIdx}" data-question-card="${qIdx}" class="${compact.questionCard}">
+                        <div class="${compact.questionHeader}">
+                            <span class="${compact.questionIndex}"${getQuestionScaleStyle()}>${qIdx + 1}.</span>
+                            <h2 class="${compact.questionTitle}"${getQuestionScaleStyle()}>${q.q}<span class="${compact.questionTypeTag}">${qTypeLabel}</span></h2>
                         </div>
                         ${contentHtml}`;
 
                 if (state.mode === 'practice' && isAnswered && !isPracticeHintOpen) {
-                    cardHtml += `<button onclick="toggleHint(${qIdx})" class="mt-8 w-full py-4 bg-indigo-50 text-indigo-600 rounded-2xl font-bold">💡 查看解析提示</button>`;
+                    cardHtml += `<button onclick="toggleHint(${qIdx})" class="${compact.hintButton}">💡 查看解析提示</button>`;
                 }
 
                 if (showA) {
-                    cardHtml += `<div class="analysis-card mt-10 p-8 bg-slate-50 rounded-2xl border-l-8 border-indigo-600 animate__animated animate__fadeInUp"${getQuestionScaleStyle()}>
-                        <p class="text-sm font-black text-indigo-600 mb-3">正确答案：${answerText}</p>
-                        <p class="text-sm md:text-base leading-relaxed text-slate-600 font-medium">${q.analysis}</p>
+                    cardHtml += `<div class="${compact.analysisCard}"${getQuestionScaleStyle()}>
+                        <p class="${compact.analysisAnswer}">正确答案：${answerText}</p>
+                        <p class="${compact.analysisText}">${q.analysis}</p>
                     </div>`;
                 }
 
@@ -749,7 +888,7 @@
             }).join('');
 
             $('main-view').innerHTML = `
-                <div class="space-y-5 animate__animated animate__fadeIn animate__faster">
+                <div class="${compact.cardsWrap} animate__animated animate__fadeIn animate__faster">
                     ${cards}
                 </div>`;
             updateNavState();
@@ -760,6 +899,7 @@
                 renderContinuousQuestions();
                 return;
             }
+            const compact = getCompactnessPreset();
 
             const q = state.lib.questions[state.idx];
             const qType = getQuestionType(q);
@@ -782,9 +922,9 @@
             const selectedMulti = new Set(parseMultipleAnswerValue(currentAnswer));
             const correctMulti = new Set(parseMultipleAnswerValue(q.ans));
             const contentHtml = `
-                <div class="space-y-4"${getQuestionScaleStyle()}>
+                <div class="${compact.optionsWrap}"${getQuestionScaleStyle()}>
                     ${(q.options || []).map((opt, i) => {
-                        let cls = "option-card p-5 flex items-center font-bold text-slate-600";
+                        let cls = compact.optionCard;
                         if (qType === 'multiple') {
                             const isCorrectOption = correctMulti.has(i);
                             const isSelectedOption = selectedMulti.has(i);
@@ -808,34 +948,34 @@
                         }
                         if (isLockedAfterAnswer) cls += " cursor-default";
                         return `<div onclick="handleChoice(${i})" class="${cls}">
-                            <span class="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center mr-4 text-xs font-black text-slate-400 shrink-0">${String.fromCharCode(65+i)}</span>
+                            <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
                             ${opt}
                         </div>`;
                     }).join('')}
                 </div>`;
 
             let html = `
-                <div class="quiz-panel bg-white/95 rounded-[2.5rem] p-6 md:p-12 shadow-lg border border-slate-200/70 animate__animated animate__fadeIn animate__faster">
-                    <div class="flex items-start gap-3 mb-10">
-                        <span class="text-slate-400 font-black leading-none mt-1"${getQuestionScaleStyle()}>${state.idx + 1}.</span>
-                        <h2 class="text-2xl font-bold text-slate-800 leading-snug"${getQuestionScaleStyle()}>${q.q}<span class="inline-flex items-center ml-2 px-2 py-1 rounded-md text-xs font-bold bg-slate-100 text-slate-500 align-middle">${qTypeLabel}</span></h2>
+                <div class="${compact.questionCard} animate__animated animate__fadeIn animate__faster">
+                    <div class="${compact.questionHeader}">
+                        <span class="${compact.questionIndex}"${getQuestionScaleStyle()}>${state.idx + 1}.</span>
+                        <h2 class="${compact.questionTitle}"${getQuestionScaleStyle()}>${q.q}<span class="${compact.questionTypeTag}">${qTypeLabel}</span></h2>
                     </div>
                     ${contentHtml}`;
 
             if (state.mode === 'practice' && isAnswered && !isPracticeHintOpen) {
-                html += `<button onclick="toggleHint()" class="mt-8 w-full py-4 bg-indigo-50 text-indigo-600 rounded-2xl font-bold">💡 查看解析提示</button>`;
+                html += `<button onclick="toggleHint()" class="${compact.hintButton}">💡 查看解析提示</button>`;
             }
 
             if (showA) {
-                html += `<div class="analysis-card mt-10 p-8 bg-slate-50 rounded-2xl border-l-8 border-indigo-600 animate__animated animate__fadeInUp"${getQuestionScaleStyle()}>
-                    <p class="text-sm font-black text-indigo-600 mb-3">正确答案：${answerText}</p>
-                    <p class="text-sm md:text-base leading-relaxed text-slate-600 font-medium">${q.analysis}</p>
+                html += `<div class="${compact.analysisCard}"${getQuestionScaleStyle()}>
+                    <p class="${compact.analysisAnswer}">正确答案：${answerText}</p>
+                    <p class="${compact.analysisText}">${q.analysis}</p>
                 </div>`;
             }
 
-            html += `<div class="flex justify-between items-center gap-3 mt-12 pt-10 border-t pb-safe">
-                        <button onclick="jumpTo(${state.idx - 1})" ${state.idx === 0 ? 'disabled' : ''} class="font-bold text-slate-400 hover:text-slate-900 disabled:opacity-0 py-2 px-4 transition-all">上题</button>
-                        <button onclick="nextStep()" class="px-10 py-4 bg-slate-900 text-white rounded-2xl font-bold shadow-xl active:scale-95 transition-transform">
+            html += `<div class="${compact.footer}">
+                        <button onclick="jumpTo(${state.idx - 1})" ${state.idx === 0 ? 'disabled' : ''} class="${compact.prevButton}">上题</button>
+                        <button onclick="nextStep()" class="${compact.nextButton}">
                             ${nextButtonText}
                         </button>
                     </div>
@@ -1050,9 +1190,17 @@
                     setQuestionFontScaleFromPercent(event.target.value, !!state.lib && !!state.mode);
                 });
             }
+            if ($('question-density')) {
+                $('question-density').addEventListener('input', (event) => {
+                    setCompactnessLevel(event.target.value, !!state.lib && !!state.mode);
+                });
+            }
             if ($('font-size-reset')) {
                 $('font-size-reset').addEventListener('click', () => {
-                    setQuestionFontScaleFromPercent(100, !!state.lib && !!state.mode);
+                    const shouldRender = !!state.lib && !!state.mode;
+                    setQuestionFontScaleFromPercent(DEFAULT_QUESTION_FONT_PERCENT, false);
+                    setCompactnessLevel(DEFAULT_COMPACTNESS_LEVEL, false);
+                    if (shouldRender) rerenderQuestionWithLayoutUpdate();
                 });
             }
             if ($('mode-switch-btn')) {
@@ -1103,5 +1251,6 @@
                 syncDeviceProfileClass();
             });
             updateQuestionFontSizePreview();
+            updateCompactnessPreview();
             await showLibrary();
         })();
