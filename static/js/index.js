@@ -581,15 +581,6 @@
             return document.getElementById(`question-card-${index}`);
         }
 
-        function forceScrollQuestionCardToTop(index) {
-            const scroller = getMainScroller();
-            const card = getQuestionCardElement(index);
-            if (!scroller || !card) return;
-            const scrollerTop = scroller.getBoundingClientRect().top;
-            const cardTop = card.getBoundingClientRect().top;
-            scroller.scrollTop += (cardTop - scrollerTop);
-        }
-
         function syncCurrentQuestionFromScroll() {
             if (!state.lib || !isPullNavMode()) return;
             const scroller = getMainScroller();
@@ -1027,13 +1018,6 @@
             state.practiceHints[questionIdx] = true;
             state.idx = questionIdx;
             renderQuestion();
-            requestAnimationFrame(() => {
-                if (isPullNavMode()) {
-                    forceScrollQuestionCardToTop(questionIdx);
-                } else {
-                    resetMainScrollerPosition();
-                }
-            });
         }
         function nextStep() {
             if (!finalizePendingAnswer(state.idx, { strict: true, showError: true })) return;
