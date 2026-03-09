@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>题库管理后台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+        <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body class="text-slate-800" data-admin-api-base="/api/admin">
+    <div class="min-h-screen flex flex-col">
+        <header class="bg-white/85 backdrop-blur-xl border-b border-slate-200/70 px-4 md:px-6 py-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between shadow-sm">
+            <div>
+                <h1 class="text-2xl font-black">题库管理后台</h1>
+                <p class="text-sm text-slate-500">查看题集、编辑题目、维护题库内容</p>
+            </div>
+            <div class="flex w-full md:w-auto items-center md:justify-end gap-2 md:gap-3 flex-wrap">
+                <button id="theme-toggle" title="切换夜间模式" aria-label="切换夜间模式" class="toolbar-icon-btn bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 1 0 9.8 9.8Z"></path>
+                    </svg>
+                    <span class="sr-only">切换夜间模式</span>
+                </button>
+                <button id="create-library-btn" title="新建题集" aria-label="新建题集" class="toolbar-icon-btn bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 5v14"></path>
+                        <path d="M5 12h14"></path>
+                    </svg>
+                    <span class="sr-only">新建题集</span>
+                </button>
+                <button id="import-json-btn" title="导入 JSON" aria-label="导入 JSON" class="toolbar-icon-btn bg-emerald-600 text-white hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-400">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 3v11"></path>
+                        <path d="M8 10.5 12 14.5 16 10.5"></path>
+                        <path d="M4 19h16"></path>
+                    </svg>
+                    <span class="sr-only">导入 JSON</span>
+                </button>
+                <button id="export-json-btn" title="导出 JSON" aria-label="导出 JSON" class="toolbar-icon-btn bg-cyan-600 text-white hover:bg-cyan-700 focus:outline-none focus:ring-2 focus:ring-cyan-400">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 21V10"></path>
+                        <path d="M8 13.5 12 9.5 16 13.5"></path>
+                        <path d="M4 5h16"></path>
+                    </svg>
+                    <span class="sr-only">导出 JSON</span>
+                </button>
+                <button id="logout-btn" title="退出登录" aria-label="退出登录" class="toolbar-icon-btn bg-rose-100 text-rose-600 hover:bg-rose-200 focus:outline-none focus:ring-2 focus:ring-rose-300">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4"></path>
+                        <path d="M14 8l6 4-6 4"></path>
+                        <path d="M20 12H9"></path>
+                    </svg>
+                    <span class="sr-only">退出登录</span>
+                </button>
+                <a href="/" title="返回做题页" aria-label="返回做题页" class="toolbar-icon-btn bg-slate-200 text-slate-700 hover:bg-slate-300 focus:outline-none focus:ring-2 focus:ring-slate-300">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M10 5 3 12l7 7"></path>
+                        <path d="M4 12h17"></path>
+                    </svg>
+                    <span class="sr-only">返回做题页</span>
+                </a>
+            </div>
+        </header>
+        <input id="import-json-input" type="file" accept=".json,application/json" class="hidden">
+
+        <div id="notice" class="hidden mx-6 mt-4 px-4 py-3 rounded-lg text-sm font-medium"></div>
+
+        <main class="flex-1 p-3 sm:p-4 md:p-6 grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4 md:gap-6">
+            <section class="bg-white/95 rounded-2xl border border-slate-200/70 p-4 overflow-hidden shadow-sm">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="font-bold">题集列表</h2>
+                    <button id="refresh-btn" title="刷新" aria-label="刷新" class="toolbar-icon-btn bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M20 11a8 8 0 1 0 2.2 5.5"></path>
+                            <path d="M20 4v7h-7"></path>
+                        </svg>
+                        <span class="sr-only">刷新</span>
+                    </button>
+                </div>
+                <div id="library-list" class="space-y-2 max-h-[70vh] overflow-y-auto"></div>
+            </section>
+
+            <section class="bg-white/95 rounded-2xl border border-slate-200/70 p-5 shadow-sm">
+                <div id="editor-empty" class="h-full flex items-center justify-center text-slate-400">
+                    请选择左侧题集开始编辑
+                </div>
+                <div id="editor" class="hidden space-y-6"></div>
+            </section>
+        </main>
+    </div>
+
+    <div id="confirm-modal" class="fixed inset-0 bg-slate-900/50 hidden items-center justify-center p-4 z-50">
+        <div class="bg-white w-full max-w-sm rounded-2xl shadow-xl p-6">
+            <h3 id="confirm-title" class="text-lg font-black mb-2">请确认</h3>
+            <p id="confirm-message" class="text-sm text-slate-500 mb-6 leading-relaxed"></p>
+            <div class="flex gap-3">
+                <button id="confirm-cancel-btn" class="flex-1 py-2.5 rounded-lg bg-slate-100 text-slate-600 font-semibold">取消</button>
+                <button id="confirm-ok-btn" class="flex-1 py-2.5 rounded-lg bg-indigo-600 text-white font-semibold">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="create-library-modal" class="fixed inset-0 bg-slate-900/50 hidden items-center justify-center p-4 z-50">
+        <div class="bg-white w-full max-w-md rounded-2xl shadow-xl p-6">
+            <h3 class="text-lg font-black mb-2">新建题集</h3>
+            <p class="text-sm text-slate-500 mb-5">请输入题集名称和图标</p>
+            <div class="space-y-3">
+                <label class="block text-sm">
+                    <span class="text-slate-500">题集名称</span>
+                    <input id="new-lib-title" class="w-full mt-1 px-3 py-2 rounded-lg border" placeholder="例如：Java 基础题集">
+                </label>
+                <label class="block text-sm">
+                    <span class="text-slate-500">题集图标（可选）</span>
+                    <input id="new-lib-icon" class="w-full mt-1 px-3 py-2 rounded-lg border" value="📚">
+                </label>
+                <label class="block text-sm">
+                    <span class="text-slate-500">题集介绍（可选）</span>
+                    <textarea id="new-lib-description" class="w-full mt-1 px-3 py-2 rounded-lg border" rows="3" placeholder="例如：包含章节练习、真题和易错题解析"></textarea>
+                </label>
+            </div>
+            <div class="flex gap-3 mt-6">
+                <button id="create-lib-cancel-btn" class="flex-1 py-2.5 rounded-lg bg-slate-100 text-slate-600 font-semibold">取消</button>
+                <button id="create-lib-submit-btn" class="flex-1 py-2.5 rounded-lg bg-indigo-600 text-white font-semibold">创建</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/admin.js"></script>
+</body>
+</html>

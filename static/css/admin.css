@@ -1,0 +1,104 @@
+body {
+            background:
+                radial-gradient(900px 400px at 5% -10%, rgba(99, 102, 241, 0.12), transparent),
+                radial-gradient(800px 360px at 95% 0%, rgba(16, 185, 129, 0.10), transparent),
+                #f1f5f9;
+        }
+        ::-webkit-scrollbar { width: 9px; height: 9px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        @media (max-width: 768px) {
+            input, textarea, button, select { font-size: 16px; }
+        }
+        .toolbar-icon-btn {
+            width: 2.5rem;
+            height: 2.5rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 0.75rem;
+            transition: all 0.2s ease;
+        }
+        .toolbar-icon-btn svg {
+            width: 1.2rem;
+            height: 1.2rem;
+        }
+        body.theme-dark {
+            background:
+                radial-gradient(980px 460px at 8% -10%, rgba(79, 70, 229, 0.2), transparent),
+                radial-gradient(860px 420px at 92% 0%, rgba(6, 182, 212, 0.12), transparent),
+                #020617;
+            color: #e2e8f0;
+        }
+        body.theme-dark header {
+            background: rgba(2, 6, 23, 0.78) !important;
+            border-color: rgba(51, 65, 85, 0.8) !important;
+        }
+        body.theme-dark header h1 { color: #f8fafc; }
+        body.theme-dark header p { color: #94a3b8 !important; }
+        body.theme-dark main > section,
+        body.theme-dark #confirm-modal > div,
+        body.theme-dark #create-library-modal > div,
+        body.theme-dark [data-question-id],
+        body.theme-dark .bg-slate-50 {
+            background: rgba(15, 23, 42, 0.9) !important;
+            border-color: rgba(71, 85, 105, 0.72) !important;
+            color: #e2e8f0 !important;
+        }
+        body.theme-dark input,
+        body.theme-dark textarea,
+        body.theme-dark select {
+            background: rgba(15, 23, 42, 0.95) !important;
+            border-color: rgba(71, 85, 105, 0.85) !important;
+            color: #e2e8f0 !important;
+        }
+        body.theme-dark input::placeholder,
+        body.theme-dark textarea::placeholder {
+            color: #64748b;
+        }
+        body.theme-dark .text-slate-500,
+        body.theme-dark .text-slate-400 {
+            color: #94a3b8 !important;
+        }
+        body.theme-dark .toolbar-icon-btn.bg-slate-100,
+        body.theme-dark .bg-slate-200 {
+            background: rgba(30, 41, 59, 0.95) !important;
+            color: #cbd5e1 !important;
+            border-color: rgba(71, 85, 105, 0.8) !important;
+        }
+        body.theme-dark .toolbar-icon-btn.bg-slate-100:hover,
+        body.theme-dark .bg-slate-200:hover {
+            background: rgba(51, 65, 85, 0.98) !important;
+            color: #f8fafc !important;
+        }
+        body.theme-dark #notice.bg-emerald-50 {
+            background: rgba(16, 185, 129, 0.15) !important;
+            color: #a7f3d0 !important;
+            border-color: rgba(16, 185, 129, 0.35) !important;
+        }
+        body.theme-dark #notice.bg-rose-50 {
+            background: rgba(244, 63, 94, 0.14) !important;
+            color: #fecdd3 !important;
+            border-color: rgba(244, 63, 94, 0.32) !important;
+        }
+        body.theme-dark #library-list button {
+            background: rgba(15, 23, 42, 0.9) !important;
+            border-color: rgba(71, 85, 105, 0.72) !important;
+            color: #e2e8f0 !important;
+        }
+        body.theme-dark #library-list button.bg-indigo-50 {
+            background: rgba(79, 70, 229, 0.22) !important;
+            border-color: rgba(129, 140, 248, 0.58) !important;
+        }
+        body.theme-dark .bg-indigo-600 { background: #4338ca !important; }
+        body.theme-dark .bg-emerald-600 { background: #047857 !important; }
+        body.theme-dark .bg-cyan-600 { background: #0e7490 !important; }
+        body.theme-dark .bg-rose-100 {
+            background: rgba(127, 29, 29, 0.35) !important;
+            color: #fecdd3 !important;
+        }
+        body.theme-dark .bg-slate-100 {
+            background: rgba(30, 41, 59, 0.95) !important;
+            color: #cbd5e1 !important;
+            border-color: rgba(71, 85, 105, 0.8) !important;
+        }

@@ -1,0 +1,115 @@
+{
+  "libraries": [
+    {
+      "id": "python-basic-001",
+      "title": "Python 基础题库",
+      "icon": "🐍",
+      "questions": [
+        {
+          "question": "Python 中用于定义函数的关键字是？",
+          "type": "single",
+          "options": ["func", "function", "def", "lambda"],
+          "answer": "2",
+          "analysis": "Python 使用 def 定义函数。",
+          "difficulty": 1,
+          "subject": "Python",
+          "knowledge_point": "函数定义"
+        },
+        {
+          "question": "以下哪个是 Python 的可变数据类型？",
+          "type": "single",
+          "options": ["tuple", "str", "list", "int"],
+          "answer": "2",
+          "analysis": "list 是可变类型，tuple/str/int 是不可变类型。",
+          "difficulty": 1,
+          "subject": "Python",
+          "knowledge_point": "数据类型"
+        },
+        {
+          "question": "读取字典 d 中 key 为 name 的值，正确写法是？",
+          "type": "single",
+          "options": ["d.name", "d['name']", "d(name)", "d->name"],
+          "answer": "1",
+          "analysis": "字典通过中括号加键访问：d['name']。",
+          "difficulty": 1,
+          "subject": "Python",
+          "knowledge_point": "字典"
+        }
+      ]
+    },
+    {
+      "id": "mysql-basic-001",
+      "title": "MySQL 基础题库",
+      "icon": "🛢️",
+      "questions": [
+        {
+          "question": "查询表中所有字段的 SQL 是？",
+          "type": "single",
+          "options": ["GET * FROM users", "SELECT * FROM users", "FIND * FROM users", "SHOW * FROM users"],
+          "answer": "1",
+          "analysis": "标准 SQL 使用 SELECT * FROM 表名。",
+          "difficulty": 1,
+          "subject": "MySQL",
+          "knowledge_point": "基础查询"
+        },
+        {
+          "question": "用于按条件过滤记录的子句是？",
+          "type": "single",
+          "options": ["ORDER BY", "GROUP BY", "WHERE", "LIMIT"],
+          "answer": "2",
+          "analysis": "WHERE 子句用于条件过滤。",
+          "difficulty": 1,
+          "subject": "MySQL",
+          "knowledge_point": "条件过滤"
+        },
+        {
+          "question": "以下哪个语句用于新增一条记录？",
+          "type": "single",
+          "options": ["ADD INTO", "INSERT INTO", "CREATE INTO", "UPDATE INTO"],
+          "answer": "1",
+          "analysis": "新增记录使用 INSERT INTO。",
+          "difficulty": 1,
+          "subject": "MySQL",
+          "knowledge_point": "数据插入"
+        }
+      ]
+    },
+    {
+      "id": "js-basic-001",
+      "title": "JavaScript 基础题库",
+      "icon": "🟨",
+      "questions": [
+        {
+          "question": "声明块级作用域变量应使用？",
+          "type": "single",
+          "options": ["var", "let", "define", "consts"],
+          "answer": "1",
+          "analysis": "let 和 const 是块级作用域，题干问变量声明通常选 let。",
+          "difficulty": 1,
+          "subject": "JavaScript",
+          "knowledge_point": "作用域"
+        },
+        {
+          "question": "数组去重最常用的内置结构是？",
+          "type": "single",
+          "options": ["Map", "WeakMap", "Set", "Object"],
+          "answer": "2",
+          "analysis": "Set 天然不保存重复值，常用于数组去重。",
+          "difficulty": 1,
+          "subject": "JavaScript",
+          "knowledge_point": "数组处理"
+        },
+        {
+          "question": "异步请求结果通常通过哪个对象的 then 获取？",
+          "type": "single",
+          "options": ["Promise", "Timer", "Event", "CallbackQueue"],
+          "answer": "0",
+          "analysis": "Promise 支持 then/catch/finally 链式处理。",
+          "difficulty": 1,
+          "subject": "JavaScript",
+          "knowledge_point": "异步编程"
+        }
+      ]
+    }
+  ]
+}

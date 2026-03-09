@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>QUIZ PRO - 全平台响应式刷题系统</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"/>
+    <link rel="stylesheet" href="/static/css/index.css">
+</head>
+<body class="overflow-hidden" data-api-base="/api">
+
+    <nav class="h-16 bg-white/85 backdrop-blur-xl border-b border-slate-200/70 shadow-sm flex items-center px-3 sm:px-4 md:px-8 justify-between sticky top-0 z-[110]">
+        <div class="flex items-center gap-4">
+            <button id="sidebar-trigger" onclick="toggleSidebar()" class="p-2 hover:bg-slate-100 rounded-xl hidden">
+                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"></path></svg>
+            </button>
+            <div class="flex items-center gap-2 cursor-pointer" onclick="goHome(true)">
+                <div class="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-black">Q</div>
+                <span class="font-black text-xl tracking-tighter hidden sm:block">QUIZ PRO</span>
+            </div>
+        </div>
+        <div class="flex items-center gap-3">
+            <button id="theme-toggle" title="切换夜间模式" aria-label="切换夜间模式" class="w-9 h-9 sm:w-10 sm:h-10 inline-flex items-center justify-center rounded-xl bg-slate-100 text-slate-500 hover:bg-slate-200 border border-slate-200">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 1 0 9.8 9.8Z"></path>
+                </svg>
+                <span class="sr-only">切换夜间模式</span>
+            </button>
+            <div id="nav-mode-wrap" class="hidden">
+                <button id="nav-mode-toggle" title="切换滚动模式" aria-label="切换滚动模式" class="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 border border-slate-200 inline-flex items-center justify-center">
+                    <span id="nav-mode-icon" aria-hidden="true">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M5 12h14"></path>
+                            <path d="m13 6 6 6-6 6"></path>
+                        </svg>
+                    </span>
+                    <span class="sr-only">切换滚动模式</span>
+                </button>
+            </div>
+            <div id="font-size-wrap" class="hidden relative">
+                <button id="font-size-btn" title="调整刷题字体" aria-label="调整刷题字体" class="h-9 sm:h-10 px-3 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 border border-slate-200 inline-flex items-center gap-1.5 text-xs sm:text-sm font-semibold">
+                    <span aria-hidden="true" class="font-black">A</span>
+                    <span id="font-size-label">100%</span>
+                </button>
+                <div id="font-size-panel" class="hidden absolute right-0 mt-2 w-52 bg-white border border-slate-200 rounded-xl shadow-xl p-3 z-[140]">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-xs font-semibold text-slate-500">刷题字体</span>
+                        <span id="font-size-value" class="text-xs font-bold text-slate-400">100%</span>
+                    </div>
+                    <input type="range" id="question-font-size" min="85" max="140" step="5" value="100" class="w-full accent-indigo-600">
+                    <button id="font-size-reset" class="mt-3 w-full py-1.5 rounded-lg bg-slate-100 text-slate-600 text-xs font-semibold">恢复默认</button>
+                </div>
+            </div>
+            <div id="mode-switch-wrap" class="hidden relative">
+                <button id="mode-switch-btn" title="切换答题模式" aria-label="切换答题模式" class="h-9 sm:h-10 px-3 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 border border-slate-200 inline-flex items-center gap-1.5 text-xs sm:text-sm font-semibold">
+                    <span id="mode-switch-label">browse</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="m6 9 6 6 6-6"></path>
+                    </svg>
+                </button>
+                <div id="mode-switch-menu" class="hidden absolute right-0 mt-2 w-32 bg-white border border-slate-200 rounded-xl shadow-xl p-1 z-[140]">
+                    <button data-mode-switch="browse" class="mode-switch-item w-full text-left px-3 py-2 text-xs sm:text-sm rounded-lg hover:bg-slate-100">browse</button>
+                    <button data-mode-switch="practice" class="mode-switch-item w-full text-left px-3 py-2 text-xs sm:text-sm rounded-lg hover:bg-slate-100">practice</button>
+                    <button data-mode-switch="analysis" class="mode-switch-item w-full text-left px-3 py-2 text-xs sm:text-sm rounded-lg hover:bg-slate-100">analysis</button>
+                    <button data-mode-switch="exam" class="mode-switch-item w-full text-left px-3 py-2 text-xs sm:text-sm rounded-lg hover:bg-slate-100">exam</button>
+                </div>
+            </div>
+            <a href="/admin" title="管理后台" aria-label="管理后台" class="w-9 h-9 sm:w-10 sm:h-10 inline-flex items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 hover:bg-indigo-100 border border-indigo-100">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"></path>
+                    <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.03.03a2.08 2.08 0 1 1-2.94 2.94l-.03-.03a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2.08 2.08 0 1 1-4.16 0v-.06a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.87.34l-.03.03a2.08 2.08 0 1 1-2.94-2.94l.03-.03a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2.08 2.08 0 1 1 0-4.16h.06a1.7 1.7 0 0 0 1.56-1.03 1.7 1.7 0 0 0-.34-1.87l-.03-.03a2.08 2.08 0 1 1 2.94-2.94l.03.03a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1.02-1.56V3a2.08 2.08 0 1 1 4.16 0v.06a1.7 1.7 0 0 0 1.03 1.56h.01a1.7 1.7 0 0 0 1.87-.34l.03-.03a2.08 2.08 0 1 1 2.94 2.94l-.03.03a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1.02H21a2.08 2.08 0 1 1 0 4.16h-.06a1.7 1.7 0 0 0-1.56 1.03V15Z"></path>
+                </svg>
+                <span class="sr-only">管理后台</span>
+            </a>
+            <div id="exam-timer" class="hidden font-mono font-bold text-rose-600 bg-rose-50 px-3 py-1.5 rounded-full border border-rose-100 text-sm md:text-base animate__animated animate__pulse animate__infinite">10:00</div>
+        </div>
+    </nav>
+
+    <div id="overlay" class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+    <div class="flex app-shell">
+        <aside id="sidebar" class="hidden w-72 md:w-80 lg:w-80 border-r border-slate-200/70 flex-col bg-white/90 backdrop-blur">
+            <div class="p-6 flex-1 overflow-y-auto">
+                <div class="flex justify-between items-center mb-6">
+                    <h3 id="nav-title" class="text-[10px] font-black text-slate-400 uppercase tracking-widest">答题进度</h3>
+                    <span id="score-tag" class="hidden px-2 py-0.5 bg-indigo-600 text-white text-[10px] rounded font-bold"></span>
+                </div>
+                <div id="nav-grid" class="flex flex-wrap"></div>
+            </div>
+            <div id="submit-box" class="p-6 bg-slate-50 border-t">
+                <button onclick="submitExam()" class="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold shadow-lg active:scale-95 transition-transform">提交试卷</button>
+            </div>
+        </aside>
+
+        <main id="main-scroll" class="flex-1 overflow-y-auto bg-gradient-to-br from-slate-50 via-indigo-50/30 to-cyan-50/40 relative scroll-smooth">
+            <div id="main-view" class="max-w-4xl mx-auto p-3 sm:p-4 md:p-10 lg:p-16">
+            </div>
+        </main>
+    </div>
+
+    <div id="time-modal" class="fixed inset-0 bg-slate-900/60 z-[200] hidden flex items-center justify-center p-4 backdrop-blur-sm">
+        <div class="modal-card bg-white rounded-[2.5rem] p-8 w-full max-w-sm shadow-2xl animate__animated animate__zoomIn animate__faster">
+            <div class="text-center">
+                <div class="text-4xl mb-4">⏱️</div>
+                <div class="relative mb-8">
+                    <input type="number" id="custom-min" value="10" min="1" max="180"
+                           class="w-full text-center text-4xl font-black py-4 bg-slate-50 rounded-3xl border-2 border-transparent focus:border-indigo-500 focus:outline-none transition-all">
+                    <span class="absolute right-6 top-1/2 -translate-y-1/2 font-bold text-slate-300">MIN</span>
+                </div>
+                <div class="flex gap-4">
+                    <button onclick="closeTimeModal()" class="flex-1 py-4 font-bold text-slate-400">取消</button>
+                    <button onclick="confirmStartExam()" class="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-bold shadow-xl">开始考试</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="confirm-modal" class="fixed inset-0 bg-slate-900/60 z-[210] hidden flex items-center justify-center p-4 backdrop-blur-sm">
+        <div class="modal-card bg-white rounded-[2rem] p-6 w-full max-w-sm shadow-2xl animate__animated animate__zoomIn animate__faster">
+            <h3 id="confirm-title" class="text-xl font-black text-slate-800 mb-2">请确认</h3>
+            <p id="confirm-message" class="text-slate-500 text-sm leading-relaxed mb-6"></p>
+            <div class="flex gap-3">
+                <button id="confirm-cancel-btn" class="flex-1 py-3 rounded-xl bg-slate-100 text-slate-500 font-bold">取消</button>
+                <button id="confirm-ok-btn" class="flex-1 py-3 rounded-xl bg-indigo-600 text-white font-bold">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="fixed top-20 left-1/2 -translate-x-1/2 z-[230] hidden px-4 py-3 rounded-xl text-sm font-semibold shadow-xl"></div>
+
+    <script src="/static/js/index.js"></script>
+</body>
+</html>
