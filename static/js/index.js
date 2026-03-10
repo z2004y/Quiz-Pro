@@ -454,7 +454,7 @@
 
         function renderAfterAnswerChange(questionIdx) {
             state.idx = questionIdx;
-            renderQuestion();
+            renderQuestion({ animate: false });
         }
 
         function commitAnswer(questionIdx, answerValue, renderNow = true) {
@@ -810,7 +810,7 @@
             renderQuestion();
         }
 
-        function renderContinuousQuestions() {
+        function renderContinuousQuestions({ animate = true } = {}) {
             const isAnalysisMode = state.mode === 'analysis';
             const compact = getCompactnessPreset();
 
@@ -883,16 +883,19 @@
                 return cardHtml;
             }).join('');
 
+            const wrapClass = animate
+                ? `${compact.cardsWrap} animate__animated animate__fadeIn animate__faster`
+                : compact.cardsWrap;
             $('main-view').innerHTML = `
-                <div class="${compact.cardsWrap} animate__animated animate__fadeIn animate__faster">
+                <div class="${wrapClass}">
                     ${cards}
                 </div>`;
             updateNavState();
         }
 
-        function renderQuestion() {
+        function renderQuestion({ animate = true } = {}) {
             if (isPullNavMode()) {
-                renderContinuousQuestions();
+                renderContinuousQuestions({ animate });
                 return;
             }
             const compact = getCompactnessPreset();
@@ -950,8 +953,11 @@
                     }).join('')}
                 </div>`;
 
+            const questionCardClass = animate
+                ? `${compact.questionCard} animate__animated animate__fadeIn animate__faster`
+                : compact.questionCard;
             let html = `
-                <div class="${compact.questionCard} animate__animated animate__fadeIn animate__faster">
+                <div class="${questionCardClass}">
                     <div class="${compact.questionHeader}">
                         <span class="${compact.questionIndex}"${getQuestionScaleStyle()}>${state.idx + 1}.</span>
                         <h2 class="${compact.questionTitle}"${getQuestionScaleStyle()}>${q.q}<span class="${compact.questionTypeTag}">${qTypeLabel}</span></h2>
