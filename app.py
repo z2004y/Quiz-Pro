@@ -700,10 +700,17 @@ def get_libraries():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT l.id, l.title, l.icon, l.description, COUNT(q.id) AS question_count
+        SELECT
+            l.id,
+            l.title,
+            l.icon,
+            l.description,
+            (
+                SELECT COUNT(1)
+                FROM questions q
+                WHERE q.library_id = l.id
+            ) AS question_count
         FROM libraries l
-        LEFT JOIN questions q ON q.library_id = l.id
-        GROUP BY l.id, l.title, l.icon, l.description
         ORDER BY l.id
     ''')
     libraries = cursor.fetchall()
