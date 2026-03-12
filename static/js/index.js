@@ -897,22 +897,10 @@
                         ${libraries.map(l => `<div onclick="selectLib('${l.id}')" class="quiz-library-card border-2 border-transparent hover:border-indigo-400 cursor-pointer group">
                             <div class="quiz-library-icon mb-3 group-hover:rotate-12 transition-transform">${l.icon}</div>
                             <h3 class="text-base sm:text-lg font-bold leading-snug">${l.title}</h3>
-                            <p class="library-meta text-slate-400 text-xs sm:text-sm mt-1.5">加载中...</p>
+                            <p class="library-meta text-slate-400 text-xs sm:text-sm mt-1.5">${Number.isFinite(Number(l.question_count)) ? Number(l.question_count) : 0} 题 · 专业解析</p>
                         </div>`).join('')}
                     </div>
                 </div>`;
-            
-            // 为每个题库获取题目数量
-            libraries.forEach(async (lib) => {
-                const libraryDetails = await fetchFromAPI(`/libraries/${lib.id}`);
-                if (libraryDetails && libraryDetails.questions) {
-                    const element = document.querySelector(`[onclick="selectLib('${lib.id}')"]`);
-                    if (element) {
-                        const meta = element.querySelector('.library-meta');
-                        if (meta) meta.textContent = `${libraryDetails.questions.length} 题 · 专业解析`;
-                    }
-                }
-            });
         }
 
         async function selectLib(id, options = {}) {

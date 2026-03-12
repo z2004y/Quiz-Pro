@@ -699,7 +699,13 @@ def serve_admin_login():
 def get_libraries():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM libraries ORDER BY id')
+    cursor.execute('''
+        SELECT l.id, l.title, l.icon, l.description, COUNT(q.id) AS question_count
+        FROM libraries l
+        LEFT JOIN questions q ON q.library_id = l.id
+        GROUP BY l.id, l.title, l.icon, l.description
+        ORDER BY l.id
+    ''')
     libraries = cursor.fetchall()
     conn.close()
     
@@ -709,7 +715,8 @@ def get_libraries():
             'id': lib['id'],
             'title': lib['title'],
             'icon': lib['icon'],
-            'description': lib['description'] if 'description' in lib.keys() else ''
+            'description': lib['description'] if 'description' in lib.keys() else '',
+            'question_count': int(lib['question_count']) if 'question_count' in lib.keys() else 0
         })
     
     return jsonify(result)
