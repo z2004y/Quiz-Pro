@@ -6,7 +6,7 @@
 Q/
 ├─ app.py                  # Flask 服务入口（路由 + API）
 ├─ init_db.py              # 初始化数据库脚本
-├─ quiz.db                 # SQLite 数据库
+├─ quiz.db                 # SQLite 数据库（可选）
 ├─ 题库示例.json           # 示例导入数据
 ├─ templates/              # 页面模板（只放 HTML 结构）
 │  ├─ index.html
@@ -38,6 +38,21 @@ Q/
 - 导入：管理页点击导入图标，调用 `POST /api/admin/import-json`
 - 导出：管理页点击导出图标，调用 `GET /api/admin/export-json`
   - 可选参数：`library_id`（仅导出某个题集）
+
+## MySQL 配置
+
+项目已支持 MySQL（同时兼容 SQLite）：
+
+- `DB_BACKEND=mysql` 时使用 MySQL
+- `DB_BACKEND=sqlite`（默认）时使用本地 `quiz.db`
+
+可配置环境变量：
+
+- `MYSQL_HOST`（默认：`mysql3.sqlpub.com`）
+- `MYSQL_PORT`（默认：`3308`）
+- `MYSQL_DATABASE`（默认：`z721683736`）
+- `MYSQL_USER`（默认：`z2004y`）
+- `MYSQL_PASSWORD`（必填，建议在环境变量中配置）
 
 ## Vercel 部署（Flask）
 
@@ -81,10 +96,16 @@ Flask>=2.3,<4
 - `FLASK_SECRET_KEY`
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
+- `DB_BACKEND`（建议 `mysql`）
+- `MYSQL_HOST`
+- `MYSQL_PORT`
+- `MYSQL_DATABASE`
+- `MYSQL_USER`
+- `MYSQL_PASSWORD`
 
-### 5) 重要说明（SQLite）
+### 5) 重要说明
 
-当前项目使用 `quiz.db`（SQLite 文件）。Vercel Serverless 环境不适合做持久化写入，重部署或实例回收后数据可能丢失。
+如果在 Vercel 使用 SQLite（`DB_BACKEND=sqlite`），重部署或实例回收后数据可能丢失。
 
 - 仅做演示：可直接部署，数据变更不保证持久化。
-- 生产环境：建议改用外部数据库（如 PostgreSQL/MySQL/Supabase/Neon）。
+- 生产环境：建议使用外部 MySQL 并设置 `DB_BACKEND=mysql`。

@@ -6,6 +6,8 @@
         const QUESTION_COMPACTNESS_STORAGE_KEY = 'quiz_question_compactness_level';
         const DEFAULT_QUESTION_FONT_PERCENT = 100;
         const DEFAULT_COMPACTNESS_LEVEL = 3;
+        const ANALYSIS_ACTION_ICON = '<span class="inline-block align-[-1px] text-sm leading-none">✍️</span>';
+        const ANALYSIS_ACTION_BUTTON_CLASS = 'px-4 py-2 rounded-xl bg-indigo-50 text-indigo-600 text-sm font-bold border border-indigo-300';
         const COMPACTNESS_LABELS = ['舒展', '标准', '紧凑', '极限'];
         let toastTimer = null;
         const $ = id => document.getElementById(id);
@@ -156,6 +158,34 @@
         let confirmResolver = null;
         const MODE_SWITCHABLE = ['browse', 'practice', 'analysis', 'exam'];
 
+        function normalizeRouteMode(rawMode) {
+            const mode = String(rawMode ?? '').trim().toLowerCase();
+            return MODE_SWITCHABLE.includes(mode) ? mode : '';
+        }
+
+        function buildLibraryModeUrl(libraryId = '', mode = '') {
+            const params = new URLSearchParams();
+            if (libraryId) params.set('library', String(libraryId));
+            const normalizedMode = normalizeRouteMode(mode);
+            if (normalizedMode) params.set('mode', normalizedMode);
+            const query = params.toString();
+            return `${window.location.pathname}${query ? `?${query}` : ''}`;
+        }
+
+        function syncUrlWithState({ libraryId = '', mode = '', replace = true } = {}) {
+            const targetUrl = buildLibraryModeUrl(libraryId, mode);
+            if (`${window.location.pathname}${window.location.search}` === targetUrl) return;
+            const fn = replace ? 'replaceState' : 'pushState';
+            history[fn](null, '', targetUrl);
+        }
+
+        function readRouteState() {
+            const params = new URLSearchParams(window.location.search || '');
+            const libraryId = String(params.get('library') || '').trim();
+            const mode = normalizeRouteMode(params.get('mode'));
+            return { libraryId, mode };
+        }
+
         function isPullNavMode() {
             return state.navMode === 'pull';
         }
@@ -242,12 +272,21 @@
             const navToggle = $('nav-mode-toggle');
             const navIcon = $('nav-mode-icon');
             const fontWrap = $('font-size-wrap');
+            const restartBtn = $('restart-btn');
             if (!wrap || !label) return;
 
             const canShow = !!state.lib && !!state.mode && !state.isReview;
             wrap.classList.toggle('hidden', !canShow);
             if (navWrap) navWrap.classList.toggle('hidden', !canShow);
             if (fontWrap) fontWrap.classList.toggle('hidden', !canShow);
+            if (restartBtn) {
+                restartBtn.classList.toggle('hidden', !canShow);
+                if (canShow) {
+                    const title = state.mode === 'exam' ? '重新开始考试' : '重新开始本次刷题';
+                    restartBtn.title = title;
+                    restartBtn.setAttribute('aria-label', title);
+                }
+            }
             if (!canShow) {
                 closeModeSwitchMenu();
                 closeFontSizePanel();
@@ -370,6 +409,8 @@
             const raw = String(question?.type || 'single').trim().toLowerCase();
             if (['multiple', 'multi', 'checkbox', '多选'].includes(raw)) return 'multiple';
             if (['judge', 'true_false', 'truefalse', 'tf', '判断', '判断题'].includes(raw)) return 'judge';
+            if (['fill', 'blank', 'fill_blank', '填空', '填空题'].includes(raw)) return 'fill';
+            if (['qa', 'essay', 'short_answer', '问答', '问答题', '简答', '简答题'].includes(raw)) return 'qa';
             return 'single';
         }
 
@@ -377,7 +418,29 @@
             const qType = getQuestionType(question);
             if (qType === 'multiple') return '多选题';
             if (qType === 'judge') return '判断题';
+            if (qType === 'fill') return '填空题';
+            if (qType === 'qa') return '问答题';
             return '单选题';
+        }
+
+        function getQuestionTypeLabelByType(qType) {
+            if (qType === 'multiple') return '多选题';
+            if (qType === 'judge') return '判断题';
+            if (qType === 'fill') return '填空题';
+            if (qType === 'qa') return '问答题';
+            return '单选题';
+        }
+
+        function getNavQuestionGroups() {
+            const order = ['single', 'multiple', 'judge', 'fill', 'qa'];
+            const groups = order.map((type) => ({ type, label: getQuestionTypeLabelByType(type), indexes: [] }));
+            const groupMap = new Map(groups.map((group) => [group.type, group]));
+            (state.lib?.questions || []).forEach((question, index) => {
+                const qType = getQuestionType(question);
+                const group = groupMap.get(qType) || groupMap.get('single');
+                group.indexes.push(index);
+            });
+            return groups.filter((group) => group.indexes.length > 0);
         }
 
         function isSingleAttemptQuestionMode() {
@@ -416,12 +479,124 @@
             ).sort((a, b) => a - b);
         }
 
+        function normalizeJudgeAnswerValue(value) {
+            const token = String(value ?? '').trim().replace(/[。；;]+$/g, '').toLowerCase();
+            if (['a', '0', '正确', '对', 'true', 't', 'yes', 'y', '√'].includes(token)) return '0';
+            if (['b', '1', '错误', '错', 'false', 'f', 'no', 'n', '×', 'x'].includes(token)) return '1';
+            return null;
+        }
+
+        function parseFillAnswerValue(value) {
+            if (Array.isArray(value)) {
+                return value.map((item) => String(item ?? '').trim()).filter(Boolean);
+            }
+            return String(value ?? '')
+                .split(/[|｜]/)
+                .map((item) => item.trim())
+                .filter(Boolean);
+        }
+
+        function getMultipleAnswerFeedback(question, answerValue) {
+            const expected = parseMultipleAnswerValue(question?.ans);
+            const received = parseMultipleAnswerValue(answerValue);
+            const expectedSet = new Set(expected);
+            const receivedSet = new Set(received);
+            const wrongSelections = received.filter((idx) => !expectedSet.has(idx));
+            const missedSelections = expected.filter((idx) => !receivedSet.has(idx));
+            let status = 'correct';
+            if (wrongSelections.length || missedSelections.length) {
+                if (wrongSelections.length && missedSelections.length) status = '错选+少选';
+                else if (wrongSelections.length) status = '错选';
+                else status = '少选';
+            }
+            const receivedText = received.length
+                ? received.map((idx) => String.fromCharCode(65 + idx)).join(',')
+                : '未作答';
+            return { status, wrongSelections, missedSelections, receivedText };
+        }
+
+        function getFillAnswerFeedback(question, answerValue) {
+            const blankCount = getFillBlankCount(question);
+            const expected = getFillDraftValues(question?.ans, blankCount);
+            const received = getFillDraftValues(answerValue, blankCount);
+            let hasWrong = false;
+            let hasMissing = false;
+            const perBlank = [];
+            for (let idx = 0; idx < blankCount; idx += 1) {
+                const receivedValue = String(received[idx] ?? '').trim();
+                const expectedValue = String(expected[idx] ?? '').trim();
+                let blankStatus = '正确';
+                if (!receivedValue) {
+                    hasMissing = true;
+                    blankStatus = '少填';
+                } else if (normalizeFreeText(receivedValue) !== normalizeFreeText(expectedValue)) {
+                    hasWrong = true;
+                    blankStatus = '错填';
+                }
+                perBlank.push({
+                    index: idx + 1,
+                    status: blankStatus,
+                    received: receivedValue || '___',
+                    expected: expectedValue || '___'
+                });
+            }
+            const status = hasWrong && hasMissing
+                ? '错填+少填'
+                : (hasWrong ? '错填' : (hasMissing ? '少填' : '正确'));
+            const receivedText = received.map((item) => String(item ?? '').trim() || '___').join(' | ');
+            const detailText = perBlank
+                .map((item) => {
+                    if (item.status === '正确') return `第${item.index}空正确`;
+                    return `第${item.index}空${item.status} ${item.received} -> ${item.expected}`;
+                })
+                .join('；');
+            return { status, receivedText, detailText };
+        }
+
+        function getFillBlankCount(question) {
+            const questionText = String(question?.q ?? question?.question ?? '');
+            const matches = questionText.match(/[（(][^（）()]*[）)]/g);
+            if (matches && matches.length) return matches.length;
+            const answerCount = parseFillAnswerValue(question?.ans).length;
+            return answerCount || 1;
+        }
+
+        function getFillDraftValues(rawAnswer, blankCount) {
+            const values = String(rawAnswer ?? '')
+                .split(/[|｜]/)
+                .map((item) => item.trim());
+            const length = Math.max(1, Number(blankCount) || 1);
+            const padded = Array.from({ length }, (_, idx) => values[idx] || '');
+            return padded;
+        }
+
+        function normalizeFreeText(value) {
+            return String(value ?? '')
+                .trim()
+                .replace(/\r\n/g, '\n')
+                .replace(/\s+/g, '')
+                .replace(/[，,。；;：:、！？!?（）()【】\[\]《》“”"']/g, '')
+                .toLowerCase();
+        }
+
         function getQuestionAnswerText(question) {
             const qType = getQuestionType(question);
             if (qType === 'multiple') {
                 const answerIndexes = parseMultipleAnswerValue(question.ans);
                 if (!answerIndexes.length) return String(question.ans ?? '');
                 return answerIndexes.map((idx) => `${String.fromCharCode(65 + idx)}. ${question.options?.[idx] ?? ''}`).join(' / ');
+            }
+            if (qType === 'judge') {
+                const normalized = normalizeJudgeAnswerValue(question.ans);
+                if (normalized === '0') return '正确';
+                if (normalized === '1') return '错误';
+                return String(question.ans ?? '');
+            }
+            if (qType === 'fill') {
+                return parseFillAnswerValue(question.ans).join(' | ');
+            }
+            if (qType === 'qa') {
+                return String(question.ans ?? '');
             }
             const answerIndex = Number(question.ans);
             const hasValidAnswerIndex = Number.isInteger(answerIndex) && answerIndex >= 0 && answerIndex < (question.options || []).length;
@@ -439,6 +614,20 @@
                 const received = parseMultipleAnswerValue(userAnswer);
                 if (expected.length !== received.length) return false;
                 return expected.every((item, idx) => item === received[idx]);
+            }
+            if (qType === 'judge') {
+                const expected = normalizeJudgeAnswerValue(question.ans);
+                const received = normalizeJudgeAnswerValue(userAnswer);
+                return expected !== null && expected === received;
+            }
+            if (qType === 'fill') {
+                const expected = parseFillAnswerValue(question.ans);
+                const received = parseFillAnswerValue(userAnswer);
+                if (expected.length !== received.length) return false;
+                return expected.every((item, idx) => normalizeFreeText(item) === normalizeFreeText(received[idx]));
+            }
+            if (qType === 'qa') {
+                return normalizeFreeText(userAnswer) === normalizeFreeText(question.ans);
             }
             return String(userAnswer) === String(question.ans);
         }
@@ -471,10 +660,17 @@
             if (!state.lib || questionIdx < 0 || questionIdx >= state.lib.questions.length) return true;
             const question = state.lib.questions[questionIdx];
             const qType = getQuestionType(question);
-            if (qType !== 'multiple') return true;
+            if (qType !== 'multiple' && qType !== 'fill' && qType !== 'qa') return true;
 
             const pending = state.pendingAnswers[questionIdx];
-            if (pending === undefined) return true;
+            if (pending === undefined) {
+                if (qType === 'fill') {
+                    const blankCount = getFillBlankCount(question);
+                    const parts = getFillDraftValues('', blankCount);
+                    commitAnswer(questionIdx, parts.join('|'), false);
+                }
+                return true;
+            }
 
             if (qType === 'multiple') {
                 const selected = parseMultipleAnswerValue(pending);
@@ -486,6 +682,24 @@
                     return true;
                 }
                 commitAnswer(questionIdx, selected, false);
+                return true;
+            }
+            if (qType === 'fill') {
+                const blankCount = getFillBlankCount(question);
+                const parts = getFillDraftValues(pending, blankCount);
+                commitAnswer(questionIdx, parts.join('|'), false);
+                return true;
+            }
+            if (qType === 'qa') {
+                const text = String(pending ?? '').trim();
+                if (!text) {
+                    if (strict) {
+                        if (showError) showNotice('请输入问答题答案');
+                        return false;
+                    }
+                    return true;
+                }
+                commitAnswer(questionIdx, text, false);
                 return true;
             }
             return true;
@@ -547,6 +761,7 @@
 
             closeModeSwitchMenu();
             updateModeSwitchUI();
+            syncUrlWithState({ libraryId: state.lib.id, mode: targetMode });
             renderQuestion();
             showNotice(`已切换到 ${targetMode} 模式`, 'success');
         }
@@ -564,7 +779,7 @@
             } else {
                 resetMainScrollerPosition();
             }
-            showNotice(state.navMode === 'pull' ? '已切换为连续滚动（定位当前题）' : '已切换为下一题按钮（定位当前题）', 'success');
+            showNotice(state.navMode === 'pull' ? '已切换为连续滚动' : '已切换为下一题按钮', 'success');
         }
 
         function getMainScroller() {
@@ -641,7 +856,8 @@
             });
         }
 
-        async function showLibrary() {
+        async function showLibrary(options = {}) {
+            const skipHistorySync = !!options.skipHistorySync;
             state.lib = null; state.mode = ''; state.idx = 0; state.answers = {}; state.pendingAnswers = {}; state.wrongAttempts = {}; state.isReview = false; state.practiceHints = {}; state.submitting = false;
             resetExamPanelUI();
             resetMainScrollerPosition();
@@ -651,6 +867,7 @@
             $('sidebar-trigger').classList.add('hidden');
             $('exam-timer').classList.add('hidden');
             $('overlay').classList.remove('active');
+            if (!skipHistorySync) syncUrlWithState({ libraryId: '', mode: '' });
             
             // 显示加载状态
             $('main-view').innerHTML = `
@@ -698,7 +915,9 @@
             });
         }
 
-        async function selectLib(id) {
+        async function selectLib(id, options = {}) {
+            const routeMode = normalizeRouteMode(options.routeMode);
+            const skipHistorySync = !!options.skipHistorySync;
             // 显示加载状态
             $('main-view').innerHTML = `
                 <div class="animate__animated animate__fadeIn flex flex-col items-center justify-center py-20">
@@ -718,6 +937,7 @@
             state.lib = libraryDetails;
             const questionCount = state.lib.questions.length;
             const introduction = (state.lib.description || '').trim() || `共 ${questionCount} 题。`;
+            if (!skipHistorySync) syncUrlWithState({ libraryId: state.lib.id, mode: '' });
             
             $('main-view').innerHTML = `
                 <div class="max-w-3xl mx-auto py-8 animate__animated animate__fadeIn">
@@ -728,24 +948,41 @@
                         <p class="text-xs text-slate-400 mt-3">${questionCount} 题</p>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <button onclick="startMode('browse')" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-indigo-500 text-left flex items-center gap-4">
+                        <a href="${buildLibraryModeUrl(state.lib.id, 'browse')}" onclick="return openModeFromLink(event, 'browse')" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-indigo-500 text-left flex items-center gap-4">
                             <span class="text-2xl">💡</span>
                             <div><div class="font-bold">浏览模式</div><div class="text-xs text-slate-400">实时对错，适合快速复习</div></div>
-                        </button>
-                        <button onclick="startMode('practice')" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-emerald-500 text-left flex items-center gap-4">
+                        </a>
+                        <a href="${buildLibraryModeUrl(state.lib.id, 'practice')}" onclick="return openModeFromLink(event, 'practice')" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-emerald-500 text-left flex items-center gap-4">
                             <span class="text-2xl">✍️</span>
                             <div><div class="font-bold">练习模式</div><div class="text-xs text-slate-400">自主控制，隐藏解析</div></div>
-                        </button>
-                        <button onclick="openTimeModal()" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-rose-500 text-left flex items-center gap-4">
+                        </a>
+                        <a href="${buildLibraryModeUrl(state.lib.id, 'exam')}" onclick="return openModeFromLink(event, 'exam')" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-rose-500 text-left flex items-center gap-4">
                             <span class="text-2xl">⏱️</span>
                             <div><div class="font-bold text-rose-600">考试模式</div><div class="text-xs text-slate-400 text-rose-300">限时答题，红绿变色复盘</div></div>
-                        </button>
-                        <button onclick="startMode('analysis')" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-amber-400 text-left flex items-center gap-4">
+                        </a>
+                        <a href="${buildLibraryModeUrl(state.lib.id, 'analysis')}" onclick="return openModeFromLink(event, 'analysis')" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-amber-400 text-left flex items-center gap-4">
                             <span class="text-2xl">📖</span>
-                            <div><div class="font-bold text-amber-600">解析模式</div><div class="text-xs text-slate-400">直接显示答案和解析，不需要作答</div></div>
-                        </button>
+                            <div><div class="font-bold text-amber-600">解析模式</div><div class="text-xs text-slate-400">直接显示解析，不需要作答</div></div>
+                        </a>
                     </div>
                 </div>`;
+
+            if (routeMode) {
+                if (routeMode === 'exam') {
+                    openTimeModal();
+                } else {
+                    startMode(routeMode);
+                }
+            }
+        }
+
+        function openModeFromLink(event, mode) {
+            if (event) event.preventDefault();
+            const normalizedMode = normalizeRouteMode(mode);
+            if (!normalizedMode) return false;
+            if (normalizedMode === 'exam') openTimeModal();
+            else startMode(normalizedMode);
+            return false;
         }
 
         function openTimeModal() {
@@ -807,6 +1044,7 @@
                 }
             }
             updateModeSwitchUI();
+            syncUrlWithState({ libraryId: state.lib?.id || '', mode });
             renderQuestion();
         }
 
@@ -823,42 +1061,108 @@
                 const isSingleAttemptMode = isSingleAttemptQuestionMode();
                 const isLockedAfterAnswer = isSingleAttemptMode && isAnswered;
                 const isPracticeHintOpen = !!state.practiceHints[qIdx];
-                const showA = isAnalysisMode || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isPracticeHintOpen) || state.isReview;
+                const showA = isAnalysisMode
+                    || state.isReview
+                    || (state.mode === 'browse' && isAnswered)
+                    || (state.mode === 'practice' && isPracticeHintOpen)
+                    || isPracticeHintOpen;
                 const answerText = getQuestionAnswerText(q);
                 const currentAnswer = pendingAnswer !== undefined ? pendingAnswer : uAns;
                 const selectedSingle = currentAnswer;
                 const selectedMulti = new Set(parseMultipleAnswerValue(currentAnswer));
                 const correctMulti = new Set(parseMultipleAnswerValue(q.ans));
-                const optionsHtml = (q.options || []).map((opt, i) => {
-                    let cls = compact.optionCard;
-                    if (qType === 'multiple') {
-                        const isCorrectOption = correctMulti.has(i);
-                        const isSelectedOption = selectedMulti.has(i);
-                        if (isAnalysisMode || state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered) || isLockedAfterAnswer) {
-                            if (isCorrectOption) cls += " opt-right";
-                            else if (isSelectedOption) cls += " opt-wrong";
-                            else cls += " cursor-default";
-                        } else if (isSelectedOption) {
-                            cls += " option-selected";
+                const multiFeedback = qType === 'multiple' ? getMultipleAnswerFeedback(q, uAns) : null;
+                const fillFeedback = qType === 'fill' ? getFillAnswerFeedback(q, uAns) : null;
+                let contentHtml = '';
+                if (qType === 'fill') {
+                    const readOnly = isAnalysisMode || state.isReview || isLockedAfterAnswer;
+                    const blankCount = getFillBlankCount(q);
+                    const fillValues = getFillDraftValues(currentAnswer, blankCount);
+                    const fillInputs = fillValues.map((value, idx) => `
+                        <input
+                            type="text"
+                            value="${escapeHtml(value)}"
+                            placeholder="请输入答案"
+                            ${readOnly ? 'disabled' : ''}
+                            oninput="handleFillInput(${idx}, this.value, ${qIdx})"
+                            class="quiz-answer-input w-full rounded-xl border border-slate-200 bg-white/95 px-3 py-3 text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 ${readOnly ? 'opacity-75 cursor-not-allowed' : ''}"
+                        >
+                    `).join('');
+                    contentHtml = `
+                        <div class="space-y-2.5" ${getQuestionScaleStyle()}>
+                            ${fillInputs}
+                            ${(readOnly || state.mode === 'exam') ? '' : `<div class="flex justify-end"><button onclick="confirmCurrentAnswer(${qIdx})" class="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold shadow-sm">保存答案</button></div>`}
+                        </div>
+                    `;
+                } else if (qType === 'qa') {
+                    const textValue = String(currentAnswer ?? '');
+                    const readOnly = isAnalysisMode || state.isReview || isLockedAfterAnswer;
+                    contentHtml = `
+                        <div class="space-y-2.5" ${getQuestionScaleStyle()}>
+                            <textarea class="quiz-answer-input w-full rounded-2xl border border-slate-200 bg-white/95 px-3 py-3 text-slate-700 min-h-[150px] focus:outline-none focus:ring-2 focus:ring-indigo-300 ${readOnly ? 'opacity-75 cursor-not-allowed' : ''}" placeholder="请输入答案后自行判断" ${readOnly ? 'disabled' : ''} oninput="handleTextAnswerInput(this.value, ${qIdx})">${escapeHtml(textValue)}</textarea>
+                            ${(readOnly || state.mode === 'exam') ? '' : `
+                                <div class="flex flex-wrap justify-end gap-3">
+                                    <button onclick="markQuestionMastered(${qIdx})" class="px-4 py-2 rounded-xl bg-emerald-100 text-emerald-700 text-sm font-bold border border-emerald-200">已掌握</button>
+                                    <button onclick="markQuestionUnknown(${qIdx})" class="px-4 py-2 rounded-xl bg-amber-500 text-white text-sm font-bold">不会做</button>
+                                    <button onclick="revealQuestionAnswer(${qIdx})" class="${ANALYSIS_ACTION_BUTTON_CLASS}">${ANALYSIS_ACTION_ICON}<span class="ml-1">显示解析</span></button>
+                                </div>
+                            `}
+                        </div>
+                    `;
+                } else {
+                    const optionsHtml = (q.options || []).map((opt, i) => {
+                        let cls = compact.optionCard;
+                        if (qType === 'multiple') {
+                            const isCorrectOption = correctMulti.has(i);
+                            const isSelectedOption = selectedMulti.has(i);
+                            if (isAnalysisMode || state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered) || isLockedAfterAnswer) {
+                                if (isCorrectOption && isSelectedOption) cls += " opt-right";
+                                else if (isCorrectOption && !isSelectedOption && multiFeedback && multiFeedback.status !== 'correct' && (uAns !== undefined || state.isReview)) cls += " opt-missed";
+                                else if (isSelectedOption) cls += " opt-wrong";
+                                else cls += " cursor-default";
+                            } else if (isSelectedOption) {
+                                cls += " option-selected";
+                            }
+                            if (isLockedAfterAnswer) cls += " cursor-default";
+                            return `<label class="${cls} multi-option-row">
+                                        <input type="checkbox" class="multi-option-checkbox" ${isSelectedOption ? 'checked' : ''} ${(isAnalysisMode || state.isReview || isLockedAfterAnswer) ? 'disabled' : ''} onchange="handleChoice(${i}, ${qIdx})">
+                                        <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
+                                        ${opt}
+                                    </label>`;
+                        } else {
+                            if (isAnalysisMode) {
+                                if (String(i) === String(q.ans)) cls += " opt-right cursor-default";
+                                else cls += " cursor-default";
+                            } else if (state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered)) {
+                                if (String(i) === String(q.ans)) cls += " opt-right";
+                                else if (String(i) === String(uAns)) cls += " opt-wrong";
+                            } else if (String(i) === String(selectedSingle)) {
+                                cls += " option-selected";
+                            }
                         }
-                    } else {
-                        if (isAnalysisMode) {
-                            if (String(i) === String(q.ans)) cls += " opt-right cursor-default";
-                            else cls += " cursor-default";
-                        } else if (state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered)) {
-                            if (String(i) === String(q.ans)) cls += " opt-right";
-                            else if (String(i) === String(uAns)) cls += " opt-wrong";
-                        } else if (String(i) === String(selectedSingle)) {
-                            cls += " option-selected";
-                        }
-                    }
-                    if (isLockedAfterAnswer) cls += " cursor-default";
-                    return `<div onclick="handleChoice(${i}, ${qIdx})" class="${cls}">
-                                <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
-                                ${opt}
-                            </div>`;
-                }).join('');
-                const contentHtml = `<div class="${compact.optionsWrap}"${getQuestionScaleStyle()}>${optionsHtml}</div>`;
+                        if (isLockedAfterAnswer) cls += " cursor-default";
+                        return `<div onclick="handleChoice(${i}, ${qIdx})" class="${cls}">
+                                    <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
+                                    ${opt}
+                                </div>`;
+                    }).join('');
+                    const allSelected = (q.options || []).length > 0 && selectedMulti.size === (q.options || []).length;
+                    const showMultiToolbar = qType === 'multiple' && !(isAnalysisMode || state.isReview || isLockedAfterAnswer) && state.mode !== 'exam';
+                    contentHtml = `
+                        <div class="${compact.optionsWrap}"${getQuestionScaleStyle()}>
+                            ${optionsHtml}
+                        </div>
+                        ${showMultiToolbar ? `
+                            <div class="mt-3 flex items-center justify-between gap-3">
+                                <label class="inline-flex items-center gap-2 text-sm text-slate-500">
+                                    <input type="checkbox" ${allSelected ? 'checked' : ''} onchange="toggleSelectAllMultiple(${qIdx})">
+                                    全选
+                                </label>
+                                <button onclick="confirmCurrentAnswer(${qIdx})" class="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold shadow-sm">提交答案</button>
+                            </div>
+                        ` : ''}
+                    `;
+                }
 
                 let cardHtml = `
                     <article id="question-card-${qIdx}" data-question-card="${qIdx}" class="${compact.questionCard}">
@@ -869,13 +1173,16 @@
                         ${contentHtml}`;
 
                 if (state.mode === 'practice' && isAnswered && !isPracticeHintOpen) {
-                    cardHtml += `<button onclick="toggleHint(${qIdx})" class="${compact.hintButton}">💡 查看解析提示</button>`;
+                    cardHtml += `<div class="mt-3 flex justify-end"><button onclick="toggleHint(${qIdx})" class="${ANALYSIS_ACTION_BUTTON_CLASS}">${ANALYSIS_ACTION_ICON}<span class="ml-1">显示解析</span></button></div>`;
                 }
 
                 if (showA) {
                     cardHtml += `<div class="${compact.analysisCard}"${getQuestionScaleStyle()}>
+                        ${(qType === 'fill' && fillFeedback) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(fillFeedback.receivedText)} · ${fillFeedback.status}</p><p class="${compact.analysisText}">分空判断：${escapeHtml(fillFeedback.detailText)}</p>` : ''}
+                        ${(qType === 'qa') ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(String(uAns ?? pendingAnswer ?? '未作答'))}</p>` : ''}
+                        ${(qType === 'multiple' && multiFeedback && (uAns !== undefined || state.isReview)) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(multiFeedback.receivedText)} · ${multiFeedback.status === 'correct' ? '正确' : multiFeedback.status}</p>` : ''}
                         <p class="${compact.analysisAnswer}">正确答案：${answerText}</p>
-                        <p class="${compact.analysisText}">${q.analysis}</p>
+                        <p class="${compact.analysisText}">${q.analysis || '暂无解析'}</p>
                     </div>`;
                 }
 
@@ -910,7 +1217,11 @@
             const isLockedAfterAnswer = isSingleAttemptMode && isAnswered;
             const isPracticeHintOpen = !!state.practiceHints[state.idx];
             const isAnalysisMode = state.mode === 'analysis';
-            const showA = isAnalysisMode || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isPracticeHintOpen) || state.isReview;
+            const showA = isAnalysisMode
+                || state.isReview
+                || (state.mode === 'browse' && isAnswered)
+                || (state.mode === 'practice' && isPracticeHintOpen)
+                || isPracticeHintOpen;
             const answerText = getQuestionAnswerText(q);
             const isLastQuestion = state.idx === state.lib.questions.length - 1;
             const nextButtonText = isLastQuestion
@@ -920,38 +1231,98 @@
             const selectedSingle = currentAnswer;
             const selectedMulti = new Set(parseMultipleAnswerValue(currentAnswer));
             const correctMulti = new Set(parseMultipleAnswerValue(q.ans));
-            const contentHtml = `
-                <div class="${compact.optionsWrap}"${getQuestionScaleStyle()}>
-                    ${(q.options || []).map((opt, i) => {
-                        let cls = compact.optionCard;
-                        if (qType === 'multiple') {
-                            const isCorrectOption = correctMulti.has(i);
-                            const isSelectedOption = selectedMulti.has(i);
-                            if (isAnalysisMode || state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered) || isLockedAfterAnswer) {
-                                if (isCorrectOption) cls += " opt-right";
-                                else if (isSelectedOption) cls += " opt-wrong";
-                                else cls += " cursor-default";
-                            } else if (isSelectedOption) {
-                                cls += " option-selected";
-                            }
-                        } else {
-                            if (isAnalysisMode) {
-                                if (String(i) === String(q.ans)) cls += " opt-right cursor-default";
-                                else cls += " cursor-default";
-                            } else if (state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered)) {
-                                if (String(i) === String(q.ans)) cls += " opt-right";
-                                else if (String(i) === String(uAns)) cls += " opt-wrong";
-                            } else if (String(i) === String(selectedSingle)) {
-                                cls += " option-selected";
-                            }
+            const multiFeedback = qType === 'multiple' ? getMultipleAnswerFeedback(q, uAns) : null;
+            const fillFeedback = qType === 'fill' ? getFillAnswerFeedback(q, uAns) : null;
+            let contentHtml = '';
+            if (qType === 'fill') {
+                const readOnly = isAnalysisMode || state.isReview || isLockedAfterAnswer;
+                const blankCount = getFillBlankCount(q);
+                const fillValues = getFillDraftValues(currentAnswer, blankCount);
+                const fillInputs = fillValues.map((value, idx) => `
+                    <input
+                        type="text"
+                        value="${escapeHtml(value)}"
+                        placeholder="请输入答案"
+                        ${readOnly ? 'disabled' : ''}
+                        oninput="handleFillInput(${idx}, this.value)"
+                        class="quiz-answer-input w-full rounded-xl border border-slate-200 bg-white/95 px-3 py-3 text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 ${readOnly ? 'opacity-75 cursor-not-allowed' : ''}"
+                    >
+                `).join('');
+                contentHtml = `
+                    <div class="space-y-2.5" ${getQuestionScaleStyle()}>
+                        ${fillInputs}
+                        ${(readOnly || state.mode === 'exam') ? '' : `<div class="flex justify-end"><button onclick="confirmCurrentAnswer()" class="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold shadow-sm">保存答案</button></div>`}
+                    </div>
+                `;
+            } else if (qType === 'qa') {
+                const textValue = String(currentAnswer ?? '');
+                const readOnly = isAnalysisMode || state.isReview || isLockedAfterAnswer;
+                contentHtml = `
+                    <div class="space-y-2.5" ${getQuestionScaleStyle()}>
+                        <textarea class="quiz-answer-input w-full rounded-2xl border border-slate-200 bg-white/95 px-3 py-3 text-slate-700 min-h-[180px] focus:outline-none focus:ring-2 focus:ring-indigo-300 ${readOnly ? 'opacity-75 cursor-not-allowed' : ''}" placeholder="请输入答案后自行判断" ${readOnly ? 'disabled' : ''} oninput="handleTextAnswerInput(this.value)">${escapeHtml(textValue)}</textarea>
+                        ${(readOnly || state.mode === 'exam') ? '' : `
+                            <div class="flex flex-wrap justify-end gap-3">
+                                <button onclick="markQuestionMastered()" class="px-4 py-2 rounded-xl bg-emerald-100 text-emerald-700 text-sm font-bold border border-emerald-200">已掌握</button>
+                                <button onclick="markQuestionUnknown()" class="px-4 py-2 rounded-xl bg-amber-500 text-white text-sm font-bold">不会做</button>
+                                <button onclick="revealQuestionAnswer()" class="${ANALYSIS_ACTION_BUTTON_CLASS}">${ANALYSIS_ACTION_ICON}<span class="ml-1">显示解析</span></button>
+                            </div>
+                        `}
+                    </div>
+                `;
+            } else {
+                const optionsHtml = (q.options || []).map((opt, i) => {
+                    let cls = compact.optionCard;
+                    if (qType === 'multiple') {
+                        const isCorrectOption = correctMulti.has(i);
+                        const isSelectedOption = selectedMulti.has(i);
+                        if (isAnalysisMode || state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered) || isLockedAfterAnswer) {
+                            if (isCorrectOption && isSelectedOption) cls += " opt-right";
+                            else if (isCorrectOption && !isSelectedOption && multiFeedback && multiFeedback.status !== 'correct' && (uAns !== undefined || state.isReview)) cls += " opt-missed";
+                            else if (isSelectedOption) cls += " opt-wrong";
+                            else cls += " cursor-default";
+                        } else if (isSelectedOption) {
+                            cls += " option-selected";
                         }
                         if (isLockedAfterAnswer) cls += " cursor-default";
-                        return `<div onclick="handleChoice(${i})" class="${cls}">
+                        return `<label class="${cls} multi-option-row">
+                            <input type="checkbox" class="multi-option-checkbox" ${isSelectedOption ? 'checked' : ''} ${(isAnalysisMode || state.isReview || isLockedAfterAnswer) ? 'disabled' : ''} onchange="handleChoice(${i})">
                             <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
                             ${opt}
-                        </div>`;
-                    }).join('')}
-                </div>`;
+                        </label>`;
+                    } else {
+                        if (isAnalysisMode) {
+                            if (String(i) === String(q.ans)) cls += " opt-right cursor-default";
+                            else cls += " cursor-default";
+                        } else if (state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered)) {
+                            if (String(i) === String(q.ans)) cls += " opt-right";
+                            else if (String(i) === String(uAns)) cls += " opt-wrong";
+                        } else if (String(i) === String(selectedSingle)) {
+                            cls += " option-selected";
+                        }
+                    }
+                    if (isLockedAfterAnswer) cls += " cursor-default";
+                    return `<div onclick="handleChoice(${i})" class="${cls}">
+                        <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
+                        ${opt}
+                    </div>`;
+                }).join('');
+                const allSelected = (q.options || []).length > 0 && selectedMulti.size === (q.options || []).length;
+                const showMultiToolbar = qType === 'multiple' && !(isAnalysisMode || state.isReview || isLockedAfterAnswer) && state.mode !== 'exam';
+                contentHtml = `
+                    <div class="${compact.optionsWrap}"${getQuestionScaleStyle()}>
+                        ${optionsHtml}
+                    </div>
+                    ${showMultiToolbar ? `
+                        <div class="mt-3 flex items-center justify-between gap-3">
+                            <label class="inline-flex items-center gap-2 text-sm text-slate-500">
+                                <input type="checkbox" ${allSelected ? 'checked' : ''} onchange="toggleSelectAllMultiple()">
+                                全选
+                            </label>
+                            <button onclick="confirmCurrentAnswer()" class="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold shadow-sm">提交答案</button>
+                        </div>
+                    ` : ''}
+                `;
+            }
 
             const questionCardClass = animate
                 ? `${compact.questionCard} animate__animated animate__fadeIn animate__faster`
@@ -965,13 +1336,16 @@
                     ${contentHtml}`;
 
             if (state.mode === 'practice' && isAnswered && !isPracticeHintOpen) {
-                html += `<button onclick="toggleHint()" class="${compact.hintButton}">💡 查看解析提示</button>`;
+                html += `<div class="mt-3 flex justify-end"><button onclick="toggleHint()" class="${ANALYSIS_ACTION_BUTTON_CLASS}">${ANALYSIS_ACTION_ICON}<span class="ml-1">显示解析</span></button></div>`;
             }
 
             if (showA) {
                 html += `<div class="${compact.analysisCard}"${getQuestionScaleStyle()}>
+                    ${(qType === 'fill' && fillFeedback) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(fillFeedback.receivedText)} · ${fillFeedback.status}</p><p class="${compact.analysisText}">分空判断：${escapeHtml(fillFeedback.detailText)}</p>` : ''}
+                    ${(qType === 'qa') ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(String(uAns ?? pendingAnswer ?? '未作答'))}</p>` : ''}
+                    ${(qType === 'multiple' && multiFeedback && (uAns !== undefined || state.isReview)) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(multiFeedback.receivedText)} · ${multiFeedback.status === 'correct' ? '正确' : multiFeedback.status}</p>` : ''}
                     <p class="${compact.analysisAnswer}">正确答案：${answerText}</p>
-                    <p class="${compact.analysisText}">${q.analysis}</p>
+                    <p class="${compact.analysisText}">${q.analysis || '暂无解析'}</p>
                 </div>`;
             }
 
@@ -1008,10 +1382,6 @@
                 else selected.add(i);
                 const nextSelected = Array.from(selected).sort((a, b) => a - b);
                 state.pendingAnswers[questionIdx] = nextSelected;
-                if (shouldAutoJudgeMultiple(question, nextSelected)) {
-                    commitAnswer(questionIdx, nextSelected);
-                    return;
-                }
                 renderAfterAnswerChange(questionIdx);
                 return;
             }
@@ -1020,11 +1390,109 @@
             commitAnswer(questionIdx, i);
         }
 
+        function handleTextAnswerInput(value, questionIdx = state.idx) {
+            if (state.mode === 'analysis' || state.isReview) return;
+            const question = state.lib?.questions?.[questionIdx];
+            if (!question) return;
+            const qType = getQuestionType(question);
+            if (qType !== 'fill' && qType !== 'qa') return;
+            state.pendingAnswers[questionIdx] = String(value ?? '');
+        }
+
+        function handleFillInput(blankIndex, value, questionIdx = state.idx) {
+            if (state.mode === 'analysis' || state.isReview) return;
+            const question = state.lib?.questions?.[questionIdx];
+            if (!question || getQuestionType(question) !== 'fill') return;
+            const blankCount = getFillBlankCount(question);
+            const existing = state.pendingAnswers[questionIdx] !== undefined
+                ? state.pendingAnswers[questionIdx]
+                : state.answers[questionIdx];
+            const values = getFillDraftValues(existing, blankCount);
+            values[blankIndex] = String(value ?? '');
+            state.pendingAnswers[questionIdx] = values.join('|');
+        }
+
+        function toggleSelectAllMultiple(questionIdx = state.idx) {
+            if (state.mode === 'analysis' || state.isReview) return;
+            const question = state.lib?.questions?.[questionIdx];
+            if (!question || getQuestionType(question) !== 'multiple') return;
+            if (isSingleAttemptQuestionMode() && isQuestionAnswered(questionIdx)) return;
+            const optionCount = Array.isArray(question.options) ? question.options.length : 0;
+            if (!optionCount) return;
+            const existing = state.pendingAnswers[questionIdx] !== undefined
+                ? state.pendingAnswers[questionIdx]
+                : state.answers[questionIdx];
+            const selected = new Set(parseMultipleAnswerValue(existing));
+            const nextSelected = selected.size === optionCount
+                ? []
+                : Array.from({ length: optionCount }, (_, idx) => idx);
+            state.pendingAnswers[questionIdx] = nextSelected;
+            renderAfterAnswerChange(questionIdx);
+        }
+
+        function confirmCurrentAnswer(questionIdx = state.idx) {
+            if (!finalizePendingAnswer(questionIdx, { strict: true, showError: true })) return;
+            renderAfterAnswerChange(questionIdx);
+        }
+
+        function markQuestionMastered(questionIdx = state.idx) {
+            if (state.mode === 'analysis' || state.isReview) return;
+            const question = state.lib?.questions?.[questionIdx];
+            if (!question || getQuestionType(question) !== 'qa') return;
+            const existing = state.pendingAnswers[questionIdx] !== undefined
+                ? state.pendingAnswers[questionIdx]
+                : state.answers[questionIdx];
+            const text = String(existing ?? '').trim() || '已掌握';
+            commitAnswer(questionIdx, text, false);
+            delete state.wrongAttempts[questionIdx];
+            state.practiceHints[questionIdx] = false;
+            renderAfterAnswerChange(questionIdx);
+        }
+
+        function markQuestionUnknown(questionIdx = state.idx) {
+            if (state.mode === 'analysis' || state.isReview) return;
+            const question = state.lib?.questions?.[questionIdx];
+            if (!question) return;
+            const qType = getQuestionType(question);
+            if (qType !== 'qa' && qType !== 'fill') return;
+            const value = qType === 'qa' ? '不会做' : '';
+            commitAnswer(questionIdx, value, false);
+            state.wrongAttempts[questionIdx] = true;
+            state.practiceHints[questionIdx] = false;
+            renderAfterAnswerChange(questionIdx);
+        }
+
+        function revealQuestionAnswer(questionIdx = state.idx) {
+            if (state.mode === 'analysis') return;
+            const question = state.lib?.questions?.[questionIdx];
+            if (!question) return;
+            const qType = getQuestionType(question);
+            if (qType !== 'qa' && qType !== 'fill') return;
+            state.practiceHints[questionIdx] = true;
+            renderAfterAnswerChange(questionIdx);
+        }
+
         function toggleHint(questionIdx = state.idx) {
             state.practiceHints[questionIdx] = true;
             state.idx = questionIdx;
             renderQuestion();
         }
+
+        async function restartCurrentSession() {
+            if (!state.lib || !state.mode || state.isReview) return;
+            const isExamMode = state.mode === 'exam';
+            const ok = await showConfirmDialog({
+                title: '确认重新开始',
+                message: isExamMode ? '将清空当前考试进度并重新计时，确定继续吗？' : '将清空当前作答进度并从第一题开始，确定继续吗？',
+                confirmText: '重新开始',
+                confirmType: 'danger'
+            });
+            if (!ok) return;
+            const mode = state.mode;
+            startMode(mode);
+            showNotice('已重新开始', 'success');
+        }
+
         function nextStep() {
             if (!finalizePendingAnswer(state.idx, { strict: true, showError: true })) return;
             if (state.idx < state.lib.questions.length - 1) jumpTo(state.idx + 1);
@@ -1047,32 +1515,60 @@
         }
         function initNavGrid() {
             const frag = document.createDocumentFragment();
-            state.lib.questions.forEach((_, i) => {
-                const d = document.createElement('div'); d.className = 'n-item'; d.innerText = i + 1;
-                d.onclick = () => jumpTo(i); frag.appendChild(d);
+            const groups = getNavQuestionGroups();
+            groups.forEach((group) => {
+                const section = document.createElement('section');
+                section.className = 'n-group';
+                const title = document.createElement('div');
+                title.className = 'n-group-title';
+                title.innerText = `${group.label} ${group.indexes.length}`;
+                section.appendChild(title);
+
+                const itemsWrap = document.createElement('div');
+                itemsWrap.className = 'n-group-grid';
+                group.indexes.forEach((questionIndex) => {
+                    const d = document.createElement('div');
+                    d.className = 'n-item';
+                    d.dataset.questionIndex = String(questionIndex);
+                    d.innerText = questionIndex + 1;
+                    d.onclick = () => jumpTo(questionIndex);
+                    itemsWrap.appendChild(d);
+                });
+                section.appendChild(itemsWrap);
+                frag.appendChild(section);
             });
             $('nav-grid').innerHTML = ''; $('nav-grid').appendChild(frag);
         }
         function updateNavState() {
-            const dots = $('nav-grid').children;
+            const dots = $('nav-grid').querySelectorAll('.n-item[data-question-index]');
             const showRealtimeResult = state.mode === 'browse' || state.mode === 'practice';
-            for (let i = 0; i < dots.length; i++) {
-                const dot = dots[i]; const uA = state.answers[i];
+            for (let idx = 0; idx < dots.length; idx++) {
+                const dot = dots[idx];
+                const i = Number(dot.dataset.questionIndex);
+                if (!Number.isInteger(i)) continue;
+                const uA = state.answers[i];
                 dot.className = 'n-item'; if (i === state.idx) dot.classList.add('n-curr');
                 if (state.isReview || showRealtimeResult) {
+                    const qType = getQuestionType(state.lib.questions[i]);
                     if (uA === undefined) {
                         if (state.isReview) dot.classList.add('n-done');
                     } else {
-                        const isCorrect = isAnswerCorrect(state.lib.questions[i], uA);
-                        if (isCorrect) {
-                            if (!state.isReview && showRealtimeResult && state.wrongAttempts[i]) {
-                                // 浏览/练习中：做对但曾做错，使用过渡色强调“已改正”
-                                dot.classList.add('n-corrected');
-                            } else {
-                                dot.classList.add('n-right');
-                            }
+                        if (qType === 'qa') {
+                            // 问答题按自评展示：已掌握为绿色，不会做为红色
+                            if (state.wrongAttempts[i]) dot.classList.add('n-wrong');
+                            else dot.classList.add('n-right');
                         } else {
-                            dot.classList.add('n-wrong');
+                            const isCorrect = isAnswerCorrect(state.lib.questions[i], uA);
+                            if (isCorrect) {
+                                if (!state.isReview && showRealtimeResult && state.wrongAttempts[i]) {
+                                    // 浏览/练习中：做对但曾做错，使用过渡色强调“已改正”
+                                    dot.classList.add('n-corrected');
+                                } else {
+                                    dot.classList.add('n-right');
+                                }
+                            } else {
+                                dot.classList.add('n-wrong');
+                            }
                         }
                     }
                 } else if (uA !== undefined) dot.classList.add('n-done');
@@ -1250,5 +1746,13 @@
             });
             updateQuestionFontSizePreview();
             updateCompactnessPreview();
-            await showLibrary();
+            const routeState = readRouteState();
+            if (routeState.libraryId) {
+                await selectLib(routeState.libraryId, {
+                    routeMode: routeState.mode,
+                    skipHistorySync: true
+                });
+            } else {
+                await showLibrary({ skipHistorySync: true });
+            }
         })();

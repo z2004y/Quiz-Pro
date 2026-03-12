@@ -7,25 +7,187 @@ import uuid
 from datetime import datetime, timezone
 from functools import wraps
 
+try:
+    import pymysql
+except ImportError:
+    pymysql = None
+
 app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'quiz.db')
+DB_BACKEND = (os.environ.get('DB_BACKEND') or '').strip().lower()
+if not DB_BACKEND:
+    DB_BACKEND = 'mysql' if os.environ.get('MYSQL_HOST') else 'sqlite'
+if DB_BACKEND not in ('sqlite', 'mysql'):
+    raise RuntimeError("DB_BACKEND 仅支持 sqlite 或 mysql")
+
+MYSQL_HOST = os.environ.get('MYSQL_HOST', 'mysql3.sqlpub.com')
+MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'z721683736')
+MYSQL_USER = os.environ.get('MYSQL_USER', 'z2004y')
+MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', '')
+try:
+    MYSQL_PORT = int(os.environ.get('MYSQL_PORT', '3308'))
+except ValueError:
+    MYSQL_PORT = 3308
+
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-this-secret-key')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
 SCHEMA_INITIALIZED = False
+DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+if pymysql is not None:
+    DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, pymysql.err.IntegrityError)
+
+class MySQLCursorAdapter:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    @staticmethod
+    def _normalize_params(params):
+        if isinstance(params, list):
+            return tuple(params)
+        return params
+
+    @staticmethod
+    def _normalize_query(query):
+        return query.replace('?', '%s')
+
+    def execute(self, query, params=None):
+        sql = self._normalize_query(query)
+        if params is None:
+            return self._cursor.execute(sql)
+        return self._cursor.execute(sql, self._normalize_params(params))
+
+    def executemany(self, query, seq_of_params):
+        sql = self._normalize_query(query)
+        normalized_seq = [self._normalize_params(params) for params in seq_of_params]
+        return self._cursor.executemany(sql, normalized_seq)
+
+    def __getattr__(self, item):
+        return getattr(self._cursor, item)
+
+class MySQLConnectionAdapter:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self, *args, **kwargs):
+        return MySQLCursorAdapter(self._conn.cursor(*args, **kwargs))
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        return self._conn.close()
+
+    def __getattr__(self, item):
+        return getattr(self._conn, item)
 
 # 数据库连接函数
 def get_db_connection():
     global SCHEMA_INITIALIZED
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    if DB_BACKEND == 'mysql':
+        if pymysql is None:
+            raise RuntimeError('DB_BACKEND=mysql 但未安装 PyMySQL，请先安装依赖')
+        conn = MySQLConnectionAdapter(pymysql.connect(
+            host=MYSQL_HOST,
+            port=MYSQL_PORT,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DATABASE,
+            charset='utf8mb4',
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=False
+        ))
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+
     if not SCHEMA_INITIALIZED:
         ensure_schema(conn)
         SCHEMA_INITIALIZED = True
     return conn
 
+def ensure_mysql_schema(conn):
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS libraries (
+            id VARCHAR(64) PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            icon VARCHAR(32) NOT NULL,
+            description TEXT NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS questions (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            question TEXT NOT NULL,
+            type VARCHAR(32) NOT NULL DEFAULT 'single',
+            options TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            analysis TEXT NOT NULL,
+            difficulty INT NOT NULL DEFAULT 1,
+            chapter VARCHAR(255) NOT NULL DEFAULT '',
+            library_id VARCHAR(64) NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_questions_library_id (library_id),
+            CONSTRAINT fk_questions_library FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_answers (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            library_id VARCHAR(64) NOT NULL,
+            question_id BIGINT NOT NULL,
+            user_answer TEXT,
+            is_correct TINYINT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_user_answers_library_id (library_id),
+            INDEX idx_user_answers_question_id (question_id),
+            CONSTRAINT fk_user_answers_library FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE,
+            CONSTRAINT fk_user_answers_question FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ''')
+
+    def get_columns(table_name):
+        cursor.execute('''
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+        ''', (table_name,))
+        return {row['COLUMN_NAME'] for row in cursor.fetchall()}
+
+    library_columns = get_columns('libraries')
+    if 'description' not in library_columns:
+        cursor.execute("ALTER TABLE libraries ADD COLUMN description VARCHAR(1024) NOT NULL DEFAULT ''")
+
+    question_columns = get_columns('questions')
+    if 'chapter' not in question_columns:
+        source_column = None
+        if 'knowledge_point' in question_columns:
+            source_column = 'knowledge_point'
+        elif 'subject' in question_columns:
+            source_column = 'subject'
+
+        cursor.execute("ALTER TABLE questions ADD COLUMN chapter VARCHAR(255) NOT NULL DEFAULT ''")
+        if source_column:
+            cursor.execute(f"UPDATE questions SET chapter = COALESCE({source_column}, '')")
+
+    if 'updated_at' not in question_columns:
+        cursor.execute(
+            'ALTER TABLE questions '
+            'ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'
+        )
+
+    conn.commit()
+
 def ensure_schema(conn):
+    if DB_BACKEND == 'mysql':
+        ensure_mysql_schema(conn)
+        return
+
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='libraries'")
     if not cursor.fetchone():
@@ -41,10 +203,15 @@ def ensure_schema(conn):
     if not cursor.fetchone():
         return
 
-    cursor.execute("PRAGMA table_info(questions)")
-    question_columns = [row[1] for row in cursor.fetchall()]
+    def get_question_columns():
+        cursor.execute("PRAGMA table_info(questions)")
+        return [row[1] for row in cursor.fetchall()]
+
+    question_columns = set(get_question_columns())
     if 'subject' in question_columns:
-        # 迁移 questions 表，移除 subject 字段
+        # 迁移 questions 表，移除 subject 字段，并统一为 chapter 字段
+        chapter_source = 'chapter' if 'chapter' in question_columns else 'knowledge_point' if 'knowledge_point' in question_columns else "''"
+        updated_at_source = 'updated_at' if 'updated_at' in question_columns else 'CURRENT_TIMESTAMP'
         cursor.execute("PRAGMA foreign_keys=OFF")
         cursor.execute('DROP TABLE IF EXISTS questions_new')
         cursor.execute('''
@@ -56,21 +223,68 @@ def ensure_schema(conn):
                 answer TEXT NOT NULL,
                 analysis TEXT NOT NULL,
                 difficulty INTEGER NOT NULL DEFAULT 1,
-                knowledge_point TEXT NOT NULL DEFAULT '',
+                chapter TEXT NOT NULL DEFAULT '',
                 library_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (library_id) REFERENCES libraries (id)
             )
         ''')
-        cursor.execute('''
+        cursor.execute(f'''
             INSERT INTO questions_new (
-                id, question, type, options, answer, analysis, difficulty, knowledge_point, library_id
+                id, question, type, options, answer, analysis, difficulty, chapter, library_id, updated_at
             )
-            SELECT id, question, type, options, answer, analysis, difficulty, knowledge_point, library_id
+            SELECT id, question, type, options, answer, analysis, difficulty, {chapter_source}, library_id, {updated_at_source}
             FROM questions
         ''')
         cursor.execute('DROP TABLE questions')
         cursor.execute('ALTER TABLE questions_new RENAME TO questions')
         cursor.execute("PRAGMA foreign_keys=ON")
+        conn.commit()
+        question_columns = set(get_question_columns())
+
+    if 'chapter' not in question_columns:
+        if 'knowledge_point' in question_columns:
+            try:
+                cursor.execute("ALTER TABLE questions RENAME COLUMN knowledge_point TO chapter")
+            except sqlite3.OperationalError:
+                # SQLite 版本不支持 RENAME COLUMN 时，回退为整表迁移
+                updated_at_source = 'updated_at' if 'updated_at' in question_columns else 'CURRENT_TIMESTAMP'
+                cursor.execute("PRAGMA foreign_keys=OFF")
+                cursor.execute('DROP TABLE IF EXISTS questions_new')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS questions_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        question TEXT NOT NULL,
+                        type TEXT NOT NULL DEFAULT 'single',
+                        options TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        analysis TEXT NOT NULL,
+                        difficulty INTEGER NOT NULL DEFAULT 1,
+                        chapter TEXT NOT NULL DEFAULT '',
+                        library_id TEXT NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (library_id) REFERENCES libraries (id)
+                    )
+                ''')
+                cursor.execute(f'''
+                    INSERT INTO questions_new (
+                        id, question, type, options, answer, analysis, difficulty, chapter, library_id, updated_at
+                    )
+                    SELECT id, question, type, options, answer, analysis, difficulty, knowledge_point, library_id, {updated_at_source}
+                    FROM questions
+                ''')
+                cursor.execute('DROP TABLE questions')
+                cursor.execute('ALTER TABLE questions_new RENAME TO questions')
+                cursor.execute("PRAGMA foreign_keys=ON")
+            conn.commit()
+        else:
+            cursor.execute("ALTER TABLE questions ADD COLUMN chapter TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+        question_columns = set(get_question_columns())
+
+    if 'updated_at' not in question_columns:
+        cursor.execute("ALTER TABLE questions ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+        cursor.execute("UPDATE questions SET updated_at = CURRENT_TIMESTAMP WHERE updated_at = ''")
         conn.commit()
 
 QUESTION_TYPE_ALIASES = {
@@ -88,7 +302,19 @@ QUESTION_TYPE_ALIASES = {
     'multi': 'multiple',
     'multiple_choice': 'multiple',
     'checkbox': 'multiple',
-    '多选': 'multiple'
+    '多选': 'multiple',
+    'fill': 'fill',
+    'blank': 'fill',
+    'fill_blank': 'fill',
+    '填空': 'fill',
+    '填空题': 'fill',
+    'qa': 'qa',
+    'short_answer': 'qa',
+    'essay': 'qa',
+    '问答': 'qa',
+    '问答题': 'qa',
+    '简答': 'qa',
+    '简答题': 'qa'
 }
 
 def normalize_question_type(raw_type):
@@ -150,6 +376,9 @@ def parse_multiple_answer(raw_answer, option_count=None):
         except json.JSONDecodeError:
             tokens = re.split(r'[\s,，/|]+', text)
 
+    if len(tokens) == 1 and re.fullmatch(r'[A-Za-z]{2,}', str(tokens[0]).strip()):
+        tokens = list(str(tokens[0]).strip())
+
     indices = sorted({
         parse_option_index(token, option_count)
         for token in tokens
@@ -158,6 +387,32 @@ def parse_multiple_answer(raw_answer, option_count=None):
     if not indices:
         raise ValueError('多选答案不能为空')
     return indices
+
+def normalize_judge_answer(raw_answer):
+    token = str(raw_answer or '').strip().replace('。', '').replace('；', '').replace(';', '').lower()
+    if token in {'a', '0', '正确', '对', 'true', 't', 'yes', 'y', '√'}:
+        return '0'
+    if token in {'b', '1', '错误', '错', 'false', 'f', 'no', 'n', '×', 'x'}:
+        return '1'
+    return None
+
+def parse_fill_answers(raw_answer):
+    if isinstance(raw_answer, list):
+        tokens = [str(item).strip() for item in raw_answer]
+    else:
+        text = str(raw_answer or '').strip()
+        if not text:
+            return []
+        tokens = [item.strip() for item in re.split(r'[|｜]', text)]
+    if not tokens or any(not item for item in tokens):
+        raise ValueError('填空题答案格式不正确，请使用“答案: 答案1|答案2”')
+    return tokens
+
+def normalize_compare_text(value):
+    text = str(value or '').strip().lower()
+    text = re.sub(r'\s+', '', text)
+    text = re.sub(r'[，,。；;：:、！？!?（）()【】\[\]《》“”"\']', '', text)
+    return text
 
 def parse_stored_multiple_answer(raw_answer):
     try:
@@ -196,6 +451,34 @@ def is_answer_correct(question_type, correct_answer, user_answer, option_count=N
         except ValueError:
             return False
 
+    if q_type == 'judge':
+        expected = normalize_judge_answer(correct_answer)
+        received = normalize_judge_answer(user_answer)
+        return expected is not None and expected == received
+
+    if q_type == 'fill':
+        try:
+            expected = parse_fill_answers(correct_answer)
+            received = parse_fill_answers(user_answer)
+        except ValueError:
+            return False
+        if len(expected) != len(received):
+            return False
+        return all(
+            normalize_compare_text(expected[idx]) == normalize_compare_text(received[idx])
+            for idx in range(len(expected))
+        )
+
+    if q_type == 'qa':
+        user_text = str(user_answer or '').strip()
+        if not user_text:
+            return False
+        expected_text = str(correct_answer or '').strip()
+        if not expected_text:
+            # 主观题若未提供标准答案，仅判断是否作答
+            return True
+        return normalize_compare_text(expected_text) == normalize_compare_text(user_text)
+
     try:
         expected = parse_option_index(correct_answer, option_count)
         received = parse_option_index(user_answer, option_count)
@@ -212,6 +495,12 @@ def serialize_question(question_row):
     answer_raw = question_row['answer']
     answer = parse_stored_multiple_answer(answer_raw) if question_type == 'multiple' else answer_raw
 
+    chapter = ''
+    if 'chapter' in question_row.keys():
+        chapter = question_row['chapter']
+    elif 'knowledge_point' in question_row.keys():
+        chapter = question_row['knowledge_point']
+
     return {
         'id': question_row['id'],
         'q': question_row['question'],
@@ -220,8 +509,10 @@ def serialize_question(question_row):
         'ans': answer,
         'analysis': question_row['analysis'],
         'difficulty': question_row['difficulty'],
-        'knowledge_point': question_row['knowledge_point'],
-        'library_id': question_row['library_id']
+        'chapter': chapter,
+        'knowledge_point': chapter,
+        'library_id': question_row['library_id'],
+        'updated_at': question_row['updated_at'] if 'updated_at' in question_row.keys() else ''
     }
 
 def serialize_question_for_export(question_row):
@@ -233,6 +524,12 @@ def serialize_question_for_export(question_row):
     answer_raw = question_row['answer']
     answer = parse_stored_multiple_answer(answer_raw) if question_type == 'multiple' else answer_raw
 
+    chapter = ''
+    if 'chapter' in question_row.keys():
+        chapter = question_row['chapter']
+    elif 'knowledge_point' in question_row.keys():
+        chapter = question_row['knowledge_point']
+
     return {
         'question': question_row['question'],
         'type': question_type,
@@ -240,7 +537,8 @@ def serialize_question_for_export(question_row):
         'answer': answer,
         'analysis': question_row['analysis'],
         'difficulty': question_row['difficulty'],
-        'knowledge_point': question_row['knowledge_point']
+        'chapter': chapter,
+        'updated_at': question_row['updated_at'] if 'updated_at' in question_row.keys() else ''
     }
 
 def get_library_with_questions(conn, lib_id):
@@ -264,16 +562,12 @@ def get_library_with_questions(conn, lib_id):
 def parse_question_payload(data):
     question_text = (data.get('question') or data.get('q') or '').strip()
     analysis = (data.get('analysis') or '').strip()
-    knowledge_point = (data.get('knowledge_point') or '').strip()
+    chapter = (data.get('chapter') or data.get('knowledge_point') or '').strip()
     raw_type = str(data.get('type') or 'single').strip().lower()
-    if raw_type in {'fill', 'fill_blank', 'blank', 'text', '填空'}:
-        raise ValueError('当前版本不支持填空题，请使用单选题、多选题或判断题')
     question_type = normalize_question_type(raw_type)
 
     if not question_text:
         raise ValueError('题目内容不能为空')
-    if not analysis:
-        raise ValueError('解析不能为空')
 
     raw_answer = data.get('answer', data.get('ans'))
     if question_type == 'judge':
@@ -282,13 +576,36 @@ def parse_question_payload(data):
             options = ['正确', '错误']
         if len(options) != 2:
             raise ValueError('判断题必须提供 2 个选项')
+    elif question_type in {'fill', 'qa'}:
+        options = []
     else:
         options = parse_options(data.get('options'))
+        if question_type == 'multiple' and len(options) > 8:
+            raise ValueError('多选题最多支持 8 个选项')
     if raw_answer is None or str(raw_answer).strip() == '':
         raise ValueError('答案不能为空')
     if question_type == 'multiple':
         indices = parse_multiple_answer(raw_answer, len(options))
+        if len(indices) < 2:
+            raise ValueError('多选题答案至少需要 2 个选项')
         answer = json.dumps(indices, ensure_ascii=False)
+    elif question_type == 'judge':
+        normalized_answer = normalize_judge_answer(raw_answer)
+        if normalized_answer is None:
+            raise ValueError('判断题答案格式错误，请使用“对/错、正确/错误、√/×”')
+        answer = normalized_answer
+    elif question_type == 'fill':
+        if re.search(r'_{2,}|＿{2,}', question_text):
+            raise ValueError('填空题不能使用下划线，请使用括号（）标记空位')
+        blanks = re.findall(r'[（(][^（）()]*[）)]', question_text)
+        if not blanks:
+            raise ValueError('填空题题目必须使用括号（）标记空位')
+        fill_answers = parse_fill_answers(raw_answer)
+        if len(fill_answers) != len(blanks):
+            raise ValueError('填空题答案数量需与括号数量一致')
+        answer = '|'.join(fill_answers)
+    elif question_type == 'qa':
+        answer = str(raw_answer).strip()
     else:
         answer = str(parse_option_index(raw_answer, len(options)))
 
@@ -304,7 +621,7 @@ def parse_question_payload(data):
         'answer': answer,
         'analysis': analysis,
         'difficulty': difficulty,
-        'knowledge_point': knowledge_point
+        'chapter': chapter
     }
 
 def normalize_library_id(raw_id):
@@ -545,7 +862,7 @@ def admin_create_library():
             (lib_id, title, icon, description)
         )
         conn.commit()
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERRORS:
         conn.rollback()
         conn.close()
         return jsonify({'error': '题集 ID 已存在'}), 409
@@ -579,8 +896,14 @@ def admin_get_library_details(lib_id):
 @require_admin_auth
 def admin_update_library(lib_id):
     data = request.get_json(silent=True) or {}
+    next_lib_id = None
     fields = []
     values = []
+
+    if 'id' in data:
+        next_lib_id = normalize_library_id(data.get('id'))
+        if not next_lib_id:
+            return jsonify({'error': '题集 ID 不能为空，且只能包含字母、数字、-、_'}), 400
 
     if 'title' in data:
         title = (data.get('title') or '').strip()
@@ -598,19 +921,33 @@ def admin_update_library(lib_id):
         fields.append('description = ?')
         values.append(description)
 
-    if not fields:
+    if not fields and (not next_lib_id or next_lib_id == lib_id):
         return jsonify({'error': '没有可更新字段'}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    values.append(lib_id)
-    cursor.execute(f'UPDATE libraries SET {", ".join(fields)} WHERE id = ?', values)
-    if cursor.rowcount == 0:
+    cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (lib_id,))
+    if not cursor.fetchone():
         conn.close()
         return jsonify({'error': 'Library not found'}), 404
 
+    current_lib_id = lib_id
+    if next_lib_id and next_lib_id != lib_id:
+        cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (next_lib_id,))
+        if cursor.fetchone():
+            conn.close()
+            return jsonify({'error': '题集 ID 已存在，请更换'}), 400
+        cursor.execute('UPDATE libraries SET id = ? WHERE id = ?', (next_lib_id, lib_id))
+        cursor.execute('UPDATE questions SET library_id = ? WHERE library_id = ?', (next_lib_id, lib_id))
+        cursor.execute('UPDATE user_answers SET library_id = ? WHERE library_id = ?', (next_lib_id, lib_id))
+        current_lib_id = next_lib_id
+
+    if fields:
+        values.append(current_lib_id)
+        cursor.execute(f'UPDATE libraries SET {", ".join(fields)} WHERE id = ?', values)
+
     conn.commit()
-    result = get_library_with_questions(conn, lib_id)
+    result = get_library_with_questions(conn, current_lib_id)
     conn.close()
     return jsonify(result)
 
@@ -655,11 +992,11 @@ def admin_create_question(lib_id):
     cursor.execute('''
         INSERT INTO questions (
             question, type, options, answer, analysis,
-            difficulty, knowledge_point, library_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            difficulty, chapter, library_id, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ''', (
         payload['question'], payload['type'], payload['options'], payload['answer'],
-        payload['analysis'], payload['difficulty'], payload['knowledge_point'], lib_id
+        payload['analysis'], payload['difficulty'], payload['chapter'], lib_id
     ))
     question_id = cursor.lastrowid
     conn.commit()
@@ -703,11 +1040,11 @@ def admin_update_question(question_id):
     cursor.execute('''
         UPDATE questions
         SET question = ?, type = ?, options = ?, answer = ?, analysis = ?,
-            difficulty = ?, knowledge_point = ?, library_id = ?
+            difficulty = ?, chapter = ?, library_id = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
     ''', (
         payload['question'], payload['type'], payload['options'], payload['answer'],
-        payload['analysis'], payload['difficulty'], payload['knowledge_point'],
+        payload['analysis'], payload['difficulty'], payload['chapter'],
         target_library_id, question_id
     ))
     conn.commit()
@@ -716,6 +1053,120 @@ def admin_update_question(question_id):
     updated = serialize_question(cursor.fetchone())
     conn.close()
     return jsonify(updated)
+
+# 管理后台：批量修改题目
+@app.route('/api/admin/questions/batch', methods=['PUT'])
+@require_admin_auth
+def admin_batch_update_questions():
+    data = request.get_json(silent=True) or {}
+    raw_question_ids = data.get('question_ids')
+    if not isinstance(raw_question_ids, list) or not raw_question_ids:
+        return jsonify({'error': '请提供要修改的题目 ID 列表'}), 400
+
+    question_ids = []
+    for raw_id in raw_question_ids:
+        try:
+            question_id = int(raw_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': '题目 ID 必须是数字'}), 400
+        if question_id not in question_ids:
+            question_ids.append(question_id)
+
+    changes = data.get('changes')
+    if not isinstance(changes, dict):
+        return jsonify({'error': 'changes 字段必须是对象'}), 400
+
+    fields = []
+    values = []
+
+    if 'difficulty' in changes:
+        try:
+            difficulty = int(changes.get('difficulty'))
+        except (TypeError, ValueError):
+            return jsonify({'error': '难度必须是数字'}), 400
+        fields.append('difficulty = ?')
+        values.append(difficulty)
+
+    if 'chapter' in changes or 'knowledge_point' in changes:
+        chapter = str(changes.get('chapter', changes.get('knowledge_point')) or '').strip()
+        fields.append('chapter = ?')
+        values.append(chapter)
+
+    target_library_id = normalize_library_id(changes.get('target_library_id')) or str(changes.get('target_library_id') or '').strip()
+    if target_library_id:
+        fields.append('library_id = ?')
+        values.append(target_library_id)
+
+    copy_to_library_id = normalize_library_id(changes.get('copy_to_library_id')) or str(changes.get('copy_to_library_id') or '').strip()
+    if not fields and not copy_to_library_id:
+        return jsonify({'error': '没有可批量修改的字段'}), 400
+
+    library_id = normalize_library_id(data.get('library_id')) or str(data.get('library_id') or '').strip()
+    if not library_id:
+        return jsonify({'error': 'library_id 不能为空'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (library_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': '题集不存在'}), 404
+
+    if target_library_id:
+        cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (target_library_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({'error': '目标题集不存在'}), 404
+
+    if copy_to_library_id:
+        cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (copy_to_library_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({'error': '复制目标题集不存在'}), 404
+
+    placeholders = ','.join(['?'] * len(question_ids))
+    updated_count = 0
+    copied_count = 0
+
+    if fields:
+        sql = f'''
+            UPDATE questions
+            SET {", ".join(fields)}, updated_at = CURRENT_TIMESTAMP
+            WHERE library_id = ? AND id IN ({placeholders})
+        '''
+        cursor.execute(sql, values + [library_id] + question_ids)
+        updated_count = cursor.rowcount
+
+    if copy_to_library_id:
+        if copy_to_library_id == library_id:
+            conn.close()
+            return jsonify({'error': '复制目标题集不能与当前题集相同'}), 400
+        cursor.execute(
+            f'''
+                SELECT question, type, options, answer, analysis, difficulty, chapter
+                FROM questions
+                WHERE library_id = ? AND id IN ({placeholders})
+                ORDER BY id
+            ''',
+            [library_id] + question_ids
+        )
+        source_questions = cursor.fetchall()
+        for row in source_questions:
+            cursor.execute('''
+                INSERT INTO questions (
+                    question, type, options, answer, analysis,
+                    difficulty, chapter, library_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (
+                row['question'], row['type'], row['options'], row['answer'],
+                row['analysis'], row['difficulty'], row['chapter'], copy_to_library_id
+            ))
+        copied_count = len(source_questions)
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({'updated_count': updated_count, 'copied_count': copied_count})
 
 # 管理后台：删除题目
 @app.route('/api/admin/questions/<int:question_id>', methods=['DELETE'])
@@ -830,12 +1281,12 @@ def admin_import_libraries_from_json():
                 cursor.execute('''
                     INSERT INTO questions (
                         question, type, options, answer, analysis,
-                        difficulty, knowledge_point, library_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        difficulty, chapter, library_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ''', (
                     parsed_question['question'], parsed_question['type'], parsed_question['options'],
                     parsed_question['answer'], parsed_question['analysis'],
-                    parsed_question['difficulty'], parsed_question['knowledge_point'], target_library_id
+                    parsed_question['difficulty'], parsed_question['chapter'], target_library_id
                 ))
                 imported_question_count += 1
 

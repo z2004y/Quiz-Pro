@@ -30,8 +30,9 @@ CREATE TABLE IF NOT EXISTS questions (
     answer TEXT NOT NULL,
     analysis TEXT NOT NULL,
     difficulty INTEGER NOT NULL DEFAULT 1,
-    knowledge_point TEXT NOT NULL DEFAULT '',
+    chapter TEXT NOT NULL DEFAULT '',
     library_id TEXT NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (library_id) REFERENCES libraries (id)
 )
 ''')
@@ -135,7 +136,7 @@ questions = [
 ]
 
 cursor.executemany('''
-INSERT OR IGNORE INTO questions (id, question, type, options, answer, analysis, difficulty, knowledge_point, library_id)
+INSERT OR IGNORE INTO questions (id, question, type, options, answer, analysis, difficulty, chapter, library_id)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ''', questions)
 

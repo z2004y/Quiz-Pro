@@ -41,6 +41,21 @@
             margin: 4px; border-radius: 12px; font-size: 14px; font-weight: 800; 
             background: #f1f5f9; color: #94a3b8; transition: all 0.2s;
         }
+        .n-group {
+            margin-bottom: 0.35rem;
+        }
+        .n-group-title {
+            font-size: 11px;
+            font-weight: 800;
+            color: #94a3b8;
+            letter-spacing: 0.06em;
+            padding: 0 4px;
+            margin-bottom: 2px;
+        }
+        .n-group-grid {
+            display: flex;
+            flex-wrap: wrap;
+        }
         .n-curr { outline: 2px solid var(--indigo-600); outline-offset: 2px; color: var(--indigo-600); background: #eff6ff; }
         .n-done { background: #e2e8f0; color: #475569; }
         /* 复盘态颜色 */
@@ -54,6 +69,9 @@
         .option-selected { border-color: var(--indigo-600) !important; background: #f5f7ff; }
         .opt-wrong { border-color: var(--rose-500) !important; background: #fef2f2 !important; color: #991b1b !important; }
         .opt-right { border-color: var(--emerald-500) !important; background: #ecfdf5 !important; color: #065f46 !important; }
+        .opt-missed { border-color: #f59e0b !important; background: #fffbeb !important; color: #92400e !important; }
+        .multi-option-row { display: flex; align-items: center; gap: 0.5rem; }
+        .multi-option-checkbox { width: 1rem; height: 1rem; accent-color: #2563eb; }
         .app-shell { height: calc(var(--app-vh) * 100 - 4rem); min-height: calc(100dvh - 4rem); }
         .pb-safe { padding-bottom: max(0.75rem, var(--safe-bottom)); }
 
@@ -129,6 +147,7 @@
             border-color: rgba(51, 65, 85, 0.7);
         }
         body.theme-dark #theme-toggle,
+        body.theme-dark #restart-btn,
         body.theme-dark #font-size-btn,
         body.theme-dark #nav-mode-toggle,
         body.theme-dark #mode-switch-btn,
@@ -138,6 +157,7 @@
             color: #cbd5e1 !important;
         }
         body.theme-dark #theme-toggle:hover,
+        body.theme-dark #restart-btn:hover,
         body.theme-dark #font-size-btn:hover,
         body.theme-dark #nav-mode-toggle:hover,
         body.theme-dark #mode-switch-btn:hover,
@@ -210,6 +230,9 @@
             border-color: rgba(71, 85, 105, 0.7);
             color: #cbd5e1;
         }
+        body.theme-dark .multi-option-checkbox {
+            accent-color: #818cf8;
+        }
         body.theme-dark .option-card span {
             background: rgba(30, 41, 59, 0.95) !important;
             color: #94a3b8 !important;
@@ -217,6 +240,14 @@
         body.theme-dark .analysis-card {
             background: rgba(30, 41, 59, 0.72) !important;
             border-left-color: rgba(129, 140, 248, 0.65) !important;
+        }
+        body.theme-dark .quiz-answer-input {
+            background: rgba(15, 23, 42, 0.95) !important;
+            border-color: rgba(71, 85, 105, 0.82) !important;
+            color: #e2e8f0 !important;
+        }
+        body.theme-dark .quiz-answer-input::placeholder {
+            color: #64748b !important;
         }
         body.theme-dark .option-selected {
             border-color: rgba(129, 140, 248, 0.68) !important;
@@ -228,12 +259,18 @@
             background: rgba(16, 185, 129, 0.14) !important;
             color: #a7f3d0 !important;
         }
+        body.theme-dark .opt-missed {
+            border-color: rgba(245, 158, 11, 0.5) !important;
+            background: rgba(245, 158, 11, 0.16) !important;
+            color: #fcd34d !important;
+        }
         body.theme-dark .opt-wrong {
             border-color: rgba(244, 63, 94, 0.45) !important;
             background: rgba(244, 63, 94, 0.14) !important;
             color: #fecdd3 !important;
         }
         body.theme-dark .n-item { background: #1e293b; color: #64748b; }
+        body.theme-dark .n-group-title { color: #64748b; }
         body.theme-dark .n-done { background: #334155; color: #cbd5e1; }
         body.theme-dark .n-curr { background: #1e293b; color: #a5b4fc; outline-color: #818cf8; }
         body.theme-dark .n-right { background: rgba(16, 185, 129, 0.24) !important; color: #86efac !important; }
