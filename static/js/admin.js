@@ -687,14 +687,20 @@ D. My parents object to my going out alone at night.
             let current = null;
 
             const detectTypeHeader = (line) => {
-                const match = line.match(/^(?:[一二三四五六七八九十\d]+[、\.\)]\s*)?(单选题|多选题|判断题|填空题|问答题)\s*[:：]?$/);
-                if (!match) return '';
-                const label = match[1];
-                if (label === '单选题') return 'single';
-                if (label === '多选题') return 'multiple';
-                if (label === '判断题') return 'judge';
-                if (label === '填空题') return 'fill';
-                if (label === '问答题') return 'qa';
+                let normalized = String(line || '').trim();
+                if (!normalized) return '';
+                normalized = normalized.replace(/\s+/g, '');
+                normalized = normalized.replace(/^[#>*\-\s]+/, '');
+                normalized = normalized.replace(/^(?:第?[一二三四五六七八九十\d]+(?:部分|章|节|类)?[、\.\)）:：]?)/, '');
+                normalized = normalized.replace(/^[（(【\[]?[一二三四五六七八九十\d]+[）)】\]]?[、\.\)）:：]?/, '');
+                normalized = normalized.replace(/^(?:题型|类型)[:：]?/, '');
+                normalized = normalized.replace(/(?:（[^）]*）|\([^)]*\)|【[^】]*】|\[[^\]]*\])$/g, '');
+
+                if (/^(?:单选题|单项选择题|single|singlechoice)$/i.test(normalized)) return 'single';
+                if (/^(?:多选题|多项选择题|multiple|multiplechoice)$/i.test(normalized)) return 'multiple';
+                if (/^(?:判断题|是非题|truefalse|judge)$/i.test(normalized)) return 'judge';
+                if (/^(?:填空题|fill|fillblank|fillintheblank)$/i.test(normalized)) return 'fill';
+                if (/^(?:问答题|简答题|主观题|qa|essay|shortanswer)$/i.test(normalized)) return 'qa';
                 return '';
             };
 
@@ -729,6 +735,34 @@ D. My parents object to my going out alone at night.
                 return tokens.filter((item) => item !== '');
             };
 
+            const inferQuestionType = ({ question, options, answerRaw, presetType }) => {
+                if (presetType) return normalizeQuestionType(presetType);
+
+                const normalizedQuestion = String(question || '').trim();
+                const normalizedAnswer = String(answerRaw || '').trim();
+                const optionList = Array.isArray(options) ? options : [];
+                const hasFillBlank = /[（(][^（）()]*[）)]/.test(normalizedQuestion) || /_{2,}|＿{2,}/.test(normalizedQuestion);
+
+                if (optionList.length > 0) {
+                    try {
+                        const tokens = parseChoiceAnswerTokens(normalizedAnswer);
+                        if (tokens.length >= 2) return 'multiple';
+                        if (tokens.length === 1) return 'single';
+                    } catch (_error) {
+                        // 解析失败时继续走后续兜底逻辑
+                    }
+                    if (normalizeJudgeAnswer(normalizedAnswer) !== null && optionList.length === 2) {
+                        return 'judge';
+                    }
+                    return 'single';
+                }
+
+                const fillParts = parseFillAnswerLine(normalizedAnswer);
+                if (hasFillBlank || fillParts.length > 1) return 'fill';
+                if (normalizeJudgeAnswer(normalizedAnswer) !== null) return 'judge';
+                return 'qa';
+            };
+
             const commitCurrent = () => {
                 if (!current) return;
                 const question = String(current.question || '').trim();
@@ -736,12 +770,17 @@ D. My parents object to my going out alone at night.
                     current = null;
                     return;
                 }
-                const type = normalizeQuestionType(current.type || currentType);
                 const options = (current.options || []).map((item) => stripOptionPrefix(item)).filter(Boolean);
                 const answerRaw = String(current.answer || '').trim();
                 const analysis = String(current.analysis || '').trim();
                 const chapter = String(current.chapter || '').trim();
                 const difficulty = Math.max(1, toIntegerOrDefault(current.difficulty, 1));
+                const type = inferQuestionType({
+                    question,
+                    options,
+                    answerRaw,
+                    presetType: current.type || currentType
+                });
                 let answer = '';
 
                 if (type === 'single') {
@@ -839,13 +878,12 @@ D. My parents object to my going out alone at night.
                     return;
                 }
 
-                const questionMatch = line.match(/^(\d+)\s*[\.、\)]\s*(.+)$/);
+                const questionMatch = line.match(/^(?:第\s*\d+\s*题|[（(]\s*\d+\s*[)）]|\d+)\s*[\.、．\)）]?\s*(.+)$/);
                 if (questionMatch) {
-                    if (!currentType) return;
                     commitCurrent();
                     current = {
-                        type: currentType,
-                        question: questionMatch[2].trim(),
+                        type: currentType || '',
+                        question: questionMatch[1].trim(),
                         options: [],
                         answer: '',
                         analysis: '',
@@ -858,14 +896,14 @@ D. My parents object to my going out alone at night.
 
                 if (!current) return;
 
-                const optionMatch = line.match(/^([A-Ha-h])\s*[\.、]\s*(.+)$/);
+                const optionMatch = line.match(/^([A-Ha-h])(?:\s*[\.\、\)）:：]\s*|\s+)(.+)$/);
                 if (optionMatch) {
                     current.options.push(optionMatch[2].trim());
                     current.lastField = '';
                     return;
                 }
 
-                const answerMatch = line.match(/^(?:答案|answer)\s*[:：]\s*(.+)$/i);
+                const answerMatch = line.match(/^(?:答案|参考答案|正确答案|标准答案|answer)\s*[:：]\s*(.+)$/i);
                 if (answerMatch) {
                     current.answer = answerMatch[1].trim();
                     current.lastField = 'answer';
