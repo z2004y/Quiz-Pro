@@ -1,11 +1,13 @@
-const API_BASE = (document.body?.dataset?.adminApiBase || '/api/admin').replace(/\/+$/, '') || '/api/admin';
+        const API_BASE = (document.body?.dataset?.adminApiBase || '/api/admin').replace(/\/+$/, '') || '/api/admin';
         const darkModeMedia = window.matchMedia('(prefers-color-scheme: dark)');
         const THEME_STORAGE_KEY = 'quiz_theme_preference';
         const LIBRARY_PANEL_COLLAPSE_KEY = 'quiz_admin_library_panel_collapsed';
-        const IMPORT_TAB_IDS = ['json', 'doc', 'single'];
+        const ADMIN_PAGE_KEY = String(document.body?.dataset?.adminPage || 'question-bank').trim();
+        const IMPORT_TAB_IDS = ['json', 'doc', 'single', 'collector'];
         const EXPORT_TAB_IDS = ['json', 'txt'];
         const EXPORT_TXT_FIELDS = ['type', 'question', 'options', 'answer', 'analysis', 'difficulty', 'chapter', 'updated_at'];
         const EXPORT_TXT_DEFAULT_FIELDS = ['type', 'question', 'options', 'answer', 'analysis', 'difficulty', 'chapter'];
+        const AI_BATCH_CHUNK_SIZE = 12;
         const EXPORT_TXT_FIELD_LABELS = {
             type: '题型',
             question: '题目',
@@ -41,19 +43,579 @@ D. My parents object to my going out alone at night.
             questionTypeFilter: 'all',
             questionKnowledgeFilter: 'all',
             questionDifficultyFilter: 'all',
+            libraryVisibilityFilter: 'all',
+            questionBankKeyword: '',
+            questionBankLoading: false,
+            questionBankQuestions: [],
+            questionBankLastRefresh: '',
+            questionBankSearch: '',
+            questionBankTypeFilter: 'all',
+            questionBankKnowledgeFilter: 'all',
+            questionBankDifficultyFilter: 'all',
             libraryListCollapsed: false,
+            sidebarCollapsed: true,
+            sidebarMobileOpen: false,
             importModalTab: 'json',
             exportModalTab: 'json',
             exportTxtFields: [...EXPORT_TXT_DEFAULT_FIELDS],
             importJsonFile: null,
             importJsonPreview: null,
+            importJsonPayload: null,
             importDocQuestions: [],
             importDocParseError: '',
-            importDocLastFilename: ''
+            importDocLastFilename: '',
+            aiSettings: {
+                provider: 'openai_compatible',
+                base_url: '',
+                model: '',
+                endpoint_path: '',
+                collector_push_enabled: true,
+                collector_push_token: '',
+                has_api_key: false,
+                api_key_mask: ''
+            },
+            collectorFile: null,
+            collectorFilename: '',
+            collectorPayload: null,
+            collectorPreview: null,
+            collectorRecords: [],
+            collectorRecordsLoading: false,
+            collectorRecordsError: '',
+            previewCollapsed: {
+                importJson: true,
+                importDoc: true,
+                collector: true
+            },
+            previewExpanded: {
+                importJson: {},
+                importDoc: {},
+                collector: {}
+            }
         };
 
         const $ = (id) => document.getElementById(id);
         let confirmResolver = null;
+        let hasAutoOpenedStandaloneModal = false;
+
+        function isAdminPage(pageKey) {
+            return ADMIN_PAGE_KEY === pageKey;
+        }
+
+        function setElementHidden(element, shouldHide) {
+            if (!element) return;
+            element.classList.toggle('hidden', Boolean(shouldHide));
+        }
+
+        function renderAiKeyStatus() {
+            const el = $('ai-key-status');
+            if (!el) return;
+            if (state.aiSettings.has_api_key) {
+                el.innerText = `已保存 Key: ${state.aiSettings.api_key_mask || '已设置'}`;
+            } else {
+                el.innerText = '尚未保存 Key';
+            }
+        }
+
+        function fillAiSettingsForm(settings) {
+            if ($('ai-provider')) $('ai-provider').value = settings.provider || 'openai_compatible';
+            if ($('ai-base-url')) $('ai-base-url').value = settings.base_url || '';
+            if ($('ai-model')) $('ai-model').value = settings.model || '';
+            if ($('ai-endpoint-path')) $('ai-endpoint-path').value = settings.endpoint_path || '';
+            if ($('collector-push-enabled')) $('collector-push-enabled').checked = settings.collector_push_enabled !== false;
+            if ($('collector-push-token')) $('collector-push-token').value = settings.collector_push_token || '';
+            if ($('ai-api-key')) $('ai-api-key').value = '';
+            if ($('ai-clear-key')) $('ai-clear-key').checked = false;
+            renderAiKeyStatus();
+            if ($('ai-test-status')) $('ai-test-status').innerText = '';
+        }
+
+        async function loadAiSettings() {
+            try {
+                const data = await api('/ai-settings');
+                state.aiSettings = {
+                    provider: data.provider || 'openai_compatible',
+                    base_url: data.base_url || '',
+                    model: data.model || '',
+                    endpoint_path: data.endpoint_path || '',
+                    collector_push_enabled: data.collector_push_enabled !== false,
+                    collector_push_token: data.collector_push_token || '',
+                    has_api_key: Boolean(data.has_api_key),
+                    api_key_mask: data.api_key_mask || ''
+                };
+                fillAiSettingsForm(state.aiSettings);
+            } catch (error) {
+                notify(error.message || 'AI 设置读取失败', true);
+            }
+        }
+
+        async function saveAiSettings() {
+            const payload = {
+                provider: $('ai-provider')?.value || 'openai_compatible',
+                base_url: $('ai-base-url')?.value || '',
+                model: $('ai-model')?.value || '',
+                endpoint_path: $('ai-endpoint-path')?.value || '',
+                collector_push_enabled: $('collector-push-enabled')?.checked ?? true,
+                collector_push_token: ($('collector-push-token')?.value || '').trim(),
+                api_key: $('ai-api-key')?.value || '',
+                clear_api_key: $('ai-clear-key')?.checked || false
+            };
+            try {
+                const result = await api('/ai-settings', {
+                    method: 'POST',
+                    body: JSON.stringify(payload)
+                });
+                state.aiSettings = {
+                    provider: result.provider || payload.provider,
+                    base_url: result.base_url || payload.base_url,
+                    model: result.model || payload.model,
+                    endpoint_path: result.endpoint_path || payload.endpoint_path,
+                    collector_push_enabled: result.collector_push_enabled !== false,
+                    collector_push_token: result.collector_push_token || payload.collector_push_token,
+                    has_api_key: Boolean(result.has_api_key),
+                    api_key_mask: result.api_key_mask || ''
+                };
+                fillAiSettingsForm(state.aiSettings);
+                notify('AI 设置已保存');
+                closeSettingsModal();
+            } catch (error) {
+                notify(error.message || 'AI 设置保存失败', true);
+            }
+        }
+
+        async function testAiConnection() {
+            const statusEl = $('ai-test-status');
+            const testBtn = $('settings-test-btn');
+            const payload = {
+                provider: $('ai-provider')?.value || 'openai_compatible',
+                base_url: $('ai-base-url')?.value || '',
+                model: $('ai-model')?.value || '',
+                endpoint_path: $('ai-endpoint-path')?.value || '',
+                api_key: $('ai-api-key')?.value || '',
+                clear_api_key: $('ai-clear-key')?.checked || false
+            };
+            if (statusEl) statusEl.innerText = '连接测试中...';
+            if (testBtn) testBtn.disabled = true;
+            try {
+                const result = await api('/ai-test', {
+                    method: 'POST',
+                    body: JSON.stringify(payload)
+                });
+                if (statusEl) {
+                    statusEl.innerText = `连接成功（${result.latency_ms || 0} ms）`;
+                }
+                if (result.sample) {
+                    notify(`连接成功：${result.sample}`);
+                } else {
+                    notify('连接成功');
+                }
+            } catch (error) {
+                if (statusEl) statusEl.innerText = `连接失败：${error.message || '请检查配置'}`;
+                notify(error.message || '连接测试失败', true);
+            } finally {
+                if (testBtn) testBtn.disabled = false;
+            }
+        }
+
+        function openSettingsModal() {
+            const modal = $('settings-modal');
+            if (!modal) return;
+            modal.classList.remove('hidden');
+            fillAiSettingsForm(state.aiSettings);
+        }
+
+        function closeSettingsModal() {
+            const modal = $('settings-modal');
+            if (!modal) return;
+            modal.classList.add('hidden');
+        }
+
+        function resetCollectorState() {
+            state.collectorFile = null;
+            state.collectorFilename = '';
+            state.collectorPayload = null;
+            state.collectorPreview = null;
+            state.previewCollapsed.collector = true;
+            state.previewExpanded.collector = {};
+            if ($('collector-file-input')) $('collector-file-input').value = '';
+            if ($('collector-file-name')) $('collector-file-name').innerText = '未选择文件';
+            if ($('collector-preview')) $('collector-preview').innerText = '请上传题目文件后识别';
+            if ($('collector-replace')) $('collector-replace').checked = false;
+            if ($('collector-allow-empty-answer')) $('collector-allow-empty-answer').checked = true;
+            if ($('collector-import-btn')) $('collector-import-btn').disabled = true;
+        }
+
+        function formatFileSize(size) {
+            const num = Number(size || 0);
+            if (!Number.isFinite(num) || num <= 0) return '--';
+            if (num < 1024) return `${num} B`;
+            if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
+            return `${(num / (1024 * 1024)).toFixed(1)} MB`;
+        }
+
+        function renderCollectorRecordList() {
+            const root = $('collector-list-root');
+            if (!root) return;
+            if (state.collectorRecordsLoading) {
+                root.innerHTML = '<p>采集列表加载中...</p>';
+                return;
+            }
+            if (state.collectorRecordsError) {
+                root.innerHTML = `<p class="text-rose-600">${esc(state.collectorRecordsError)}</p>`;
+                return;
+            }
+            if (!Array.isArray(state.collectorRecords) || state.collectorRecords.length === 0) {
+                root.innerHTML = '<p class="text-slate-400">暂无采集记录</p>';
+                return;
+            }
+
+            const rowsHtml = state.collectorRecords.map((item, index) => `
+                <tr class="border-b border-slate-100 hover:bg-slate-50/70">
+                    <td class="py-2 px-2 whitespace-nowrap">${Number(item.seq || (index + 1))}</td>
+                    <td class="py-2 px-2 whitespace-nowrap">${esc(getQuestionTypeText(item.type || 'single'))}</td>
+                    <td class="py-2 px-2 max-w-[320px] truncate" title="${esc(item.question || '--')}">${esc(item.question || '--')}</td>
+                    <td class="py-2 px-2 max-w-[280px]">
+                        <div class="whitespace-pre-line line-clamp-4 text-slate-600" title="${esc(item.options || '--')}">${esc(item.options || '--')}</div>
+                    </td>
+                    <td class="py-2 px-2 max-w-[220px] break-words" title="${esc(item.answer || '--')}">${esc(item.answer || '--')}</td>
+                    <td class="py-2 px-2 whitespace-nowrap">${esc(formatEditTime(item.created_at))}</td>
+                    <td class="py-2 px-2 whitespace-nowrap">
+                        <div class="inline-flex items-center gap-2">
+                            <button class="collector-record-copy-btn text-xs px-2 py-1 rounded bg-slate-100 text-slate-700" data-answer="${esc(item.answer || '')}">复制答案</button>
+                            <button class="collector-record-delete-btn text-xs px-2 py-1 rounded bg-rose-50 text-rose-600" data-record-id="${esc(item.record_id || '')}">删除</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+
+            root.innerHTML = `
+                <div class="text-xs text-slate-400 mb-2">最近 ${state.collectorRecords.length} 条采集题目</div>
+                <div class="question-bank-list overflow-auto">
+                    <table class="min-w-full text-sm question-grid-table">
+                        <thead class="bg-slate-50 text-slate-600">
+                            <tr>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">编号</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">题型</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">题目</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">选项</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">答案</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">时间</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rowsHtml}</tbody>
+                    </table>
+                </div>
+            `;
+        }
+
+        async function loadCollectorRecordList() {
+            state.collectorRecordsLoading = true;
+            state.collectorRecordsError = '';
+            renderCollectorRecordList();
+            try {
+                const result = await api('/collector-records');
+                if (Array.isArray(result.questions)) {
+                    state.collectorRecords = result.questions;
+                } else {
+                    state.collectorRecords = Array.isArray(result.records) ? result.records : [];
+                }
+            } catch (error) {
+                state.collectorRecords = [];
+                state.collectorRecordsError = error.message || '采集列表加载失败';
+            } finally {
+                state.collectorRecordsLoading = false;
+                renderCollectorRecordList();
+            }
+        }
+
+        function renderCollectorPreview(payload, filename = '') {
+            const previewRoot = $('collector-preview');
+            if (!previewRoot) return;
+            if (!payload || !payload.libraries || !Array.isArray(payload.libraries)) {
+                previewRoot.innerHTML = '<p class="text-rose-600">AI 返回内容无效，请重试。</p>';
+                return;
+            }
+            const normalizeOptions = (raw) => {
+                if (Array.isArray(raw)) {
+                    return raw.map((item) => String(item ?? '').trim()).filter(Boolean);
+                }
+                if (typeof raw === 'string') {
+                    return raw.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+                }
+                return [];
+            };
+            const normalizeCollectorPayload = (rawPayload) => {
+                const libs = rawPayload.libraries.map((lib) => {
+                    const questions = Array.isArray(lib.questions) ? lib.questions : [];
+                    return {
+                        id: String(lib.id || '').trim(),
+                        title: String(lib.title || '未命名题集').trim(),
+                        icon: String(lib.icon || '📚').trim() || '📚',
+                        description: String(lib.description || '').trim(),
+                        questions: questions.map((q) => ({
+                            question: String(q.question || '').trim(),
+                            type: normalizeQuestionType(q.type || 'single'),
+                            options: normalizeOptions(q.options || []),
+                            answer: q.answer ?? '',
+                            analysis: q.analysis ?? '',
+                            difficulty: toIntegerOrDefault(q.difficulty, 1),
+                            chapter: String(q.chapter || '').trim()
+                        }))
+                    };
+                });
+                return { libraries: libs };
+            };
+
+            state.collectorPayload = normalizeCollectorPayload(payload);
+            const libs = state.collectorPayload.libraries;
+            const totalQuestions = libs.reduce((sum, lib) => sum + lib.questions.length, 0);
+
+            const typeOptions = [
+                { value: 'single', label: '单选题' },
+                { value: 'multiple', label: '多选题' },
+                { value: 'judge', label: '判断题' },
+                { value: 'fill', label: '填空题' },
+                { value: 'qa', label: '问答题' }
+            ];
+
+            const libsHtml = libs.map((lib, libIndex) => {
+                const questionsHtml = lib.questions.map((q, qIndex) => {
+                    const key = `${libIndex}-${qIndex}`;
+                    const isExpanded = Boolean(state.previewExpanded.collector[key]);
+                    const summary = `${getQuestionTypeText(q.type)} · ${Array.isArray(q.options) ? q.options.length : 0} 选项`;
+                    return `
+                        <article class="collector-question-card border rounded-xl p-3 bg-slate-50/70" data-collector-lib="${libIndex}" data-collector-question="${qIndex}">
+                            <div class="collector-row flex items-center gap-3">
+                                <button type="button" class="collector-expand-btn text-xs font-semibold px-2 py-1 rounded-lg bg-slate-100 text-slate-600" data-collector-lib="${libIndex}" data-collector-question="${qIndex}">
+                                    ${isExpanded ? '收起' : '展开'}
+                                </button>
+                                <div class="flex-1 min-w-0">
+                                    <div class="text-sm font-semibold text-slate-700 truncate">${esc(q.question || `题目 ${qIndex + 1}`)}</div>
+                                    <div class="text-xs text-slate-400">${esc(summary)}</div>
+                                </div>
+                                <button type="button" class="collector-ai-btn text-xs font-semibold px-2 py-1 rounded-lg bg-slate-900 text-white" data-collector-lib="${libIndex}" data-collector-question="${qIndex}">AI生成</button>
+                                <button type="button" class="collector-delete-btn text-rose-600 text-xs font-semibold" data-collector-lib="${libIndex}" data-collector-question="${qIndex}">删除</button>
+                            </div>
+                            ${isExpanded ? `
+                                <div class="mt-3 border-t border-slate-200/70 pt-3">
+                                    <label class="block text-sm mb-3">
+                                        <span class="text-slate-500">题目</span>
+                                        <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[88px]" data-collector-field="question">${esc(q.question)}</textarea>
+                                    </label>
+                                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">题型</span>
+                                            <select class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-collector-field="type">
+                                                ${typeOptions.map((item) => `<option value="${item.value}" ${q.type === item.value ? 'selected' : ''}>${item.label}</option>`).join('')}
+                                            </select>
+                                        </label>
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">难度</span>
+                                            <input type="number" min="1" max="5" class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-collector-field="difficulty" value="${esc(String(q.difficulty || 1))}">
+                                        </label>
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">章节</span>
+                                            <input class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-collector-field="chapter" value="${esc(q.chapter || '')}">
+                                        </label>
+                                    </div>
+                                    <label class="block text-sm mb-3">
+                                        <span class="text-slate-500">选项（每行一个）</span>
+                                        <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[88px]" data-collector-field="options">${esc(q.options.join('\n'))}</textarea>
+                                    </label>
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">${getAnswerLabelText(q.type)}</span>
+                                            <input class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-collector-field="answer" value="${esc(formatAnswerForEditor(q.type, q.answer))}">
+                                        </label>
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">解析</span>
+                                            <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[88px]" data-collector-field="analysis">${esc(String(q.analysis || ''))}</textarea>
+                                        </label>
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </article>
+                    `;
+                }).join('');
+
+                return `
+                    <section class="collector-lib-card border rounded-xl p-4 bg-white/95">
+                        <div class="flex flex-wrap items-center gap-3 mb-3">
+                            <label class="block text-xs">
+                                <span class="text-slate-500">题集名称</span>
+                                <input class="mt-1 px-3 py-2 rounded-lg border bg-white text-sm" data-collector-lib-field="title" data-collector-lib="${libIndex}" value="${esc(lib.title)}">
+                            </label>
+                            <label class="block text-xs">
+                                <span class="text-slate-500">题集 ID</span>
+                                <input class="mt-1 px-3 py-2 rounded-lg border bg-white text-sm" data-collector-lib-field="id" data-collector-lib="${libIndex}" value="${esc(lib.id || '')}">
+                            </label>
+                            <label class="block text-xs">
+                                <span class="text-slate-500">图标</span>
+                                <input class="mt-1 px-3 py-2 rounded-lg border bg-white text-sm w-24" data-collector-lib-field="icon" data-collector-lib="${libIndex}" value="${esc(lib.icon || '📚')}">
+                            </label>
+                        </div>
+                        <label class="block text-sm mb-3">
+                            <span class="text-slate-500">题集描述</span>
+                            <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[70px]" data-collector-lib-field="description" data-collector-lib="${libIndex}">${esc(lib.description || '')}</textarea>
+                        </label>
+                        <div class="text-xs text-slate-400 mb-3">共 ${lib.questions.length} 题</div>
+                        <div class="space-y-3">${questionsHtml || '<div class="text-sm text-slate-400">暂无题目</div>'}</div>
+                    </section>
+                `;
+            }).join('');
+
+            previewRoot.innerHTML = `
+                <div class="mb-3 text-sm flex flex-wrap items-center gap-2 justify-between">
+                    <div>
+                        <p>共识别 <strong>${totalQuestions}</strong> 道题。</p>
+                        ${filename ? `<p class="text-xs text-slate-400 mt-1">来源：${esc(filename)}</p>` : ''}
+                    </div>
+                    <button type="button" class="collector-ai-batch px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold">批量AI生成</button>
+                </div>
+                <div class="space-y-4">${libsHtml}</div>
+            `;
+        }
+
+        async function runCollector() {
+            if (!state.collectorFile) {
+                notify('请先选择题目文件', true);
+                return;
+            }
+            if (!state.aiSettings.has_api_key) {
+                notify('请先在 AI 设置中填写 API Key', true);
+                openSettingsModal();
+                return;
+            }
+            const previewRoot = $('collector-preview');
+            if (previewRoot) previewRoot.innerHTML = '<p>AI 正在识别，请稍候...</p>';
+            const formData = new FormData();
+            formData.append('file', state.collectorFile);
+            formData.append('library_title', $('collector-library-title')?.value || '');
+            formData.append('library_id', $('collector-library-id')?.value || '');
+            try {
+                const result = await api('/ai-collect', { method: 'POST', body: formData });
+                const overrideTitle = ($('collector-library-title')?.value || '').trim();
+                const overrideId = ($('collector-library-id')?.value || '').trim();
+                if (result.payload && Array.isArray(result.payload.libraries) && result.payload.libraries.length) {
+                    if (overrideTitle) result.payload.libraries[0].title = overrideTitle;
+                    if (overrideId) result.payload.libraries[0].id = overrideId;
+                }
+                state.collectorPayload = result.payload;
+                state.collectorPreview = result;
+                state.previewCollapsed.collector = true;
+                state.previewExpanded.collector = {};
+                renderCollectorPreview(result.payload, state.collectorFilename);
+                if ($('collector-import-btn')) $('collector-import-btn').disabled = false;
+                notify(`AI 识别完成：${result.question_count || 0} 道题`);
+            } catch (error) {
+                if (previewRoot) previewRoot.innerHTML = `<p class="text-rose-600">${esc(error.message || 'AI 识别失败')}</p>`;
+                notify(error.message || 'AI 识别失败', true);
+            }
+        }
+
+        async function importCollectorPayload() {
+            if (!state.collectorPayload) {
+                notify('暂无可导入的识别结果', true);
+                return;
+            }
+            const allowEmptyAnswer = $('collector-allow-empty-answer')?.checked ?? true;
+            const filtered = filterLibrariesForImport(state.collectorPayload, { allowEmptyAnswer });
+            if (!filtered.ready) {
+                notify(
+                    allowEmptyAnswer
+                        ? '没有可导入的题目（题目为空或选择题缺少选项）'
+                        : '没有可导入的题目（需填写答案与选项）',
+                    true
+                );
+                return;
+            }
+            if (filtered.ready < filtered.total) {
+                const ok = await showConfirmDialog({
+                    title: '导入题库',
+                    message: allowEmptyAnswer
+                        ? `共有 ${filtered.total} 道题，其中 ${filtered.ready} 道可导入（其余题目为空或选择题缺少选项）。确认先导入可导入题目吗？`
+                        : `共有 ${filtered.total} 道题，其中 ${filtered.ready} 道已完整可导入。确认先导入已完成题目吗？`,
+                    confirmText: '先导入可导入题目'
+                });
+                if (!ok) return;
+            }
+            const replaceExisting = $('collector-replace')?.checked ? '1' : '0';
+            const payloadText = JSON.stringify({ libraries: filtered.libraries }, null, 2);
+            const blob = new Blob([payloadText], { type: 'application/json' });
+            const file = new File([blob], 'ai-collector.json', { type: 'application/json' });
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('replace_existing', replaceExisting);
+            formData.append('allow_empty_answer', allowEmptyAnswer ? '1' : '0');
+            try {
+                const result = await api('/import-json', { method: 'POST', body: formData });
+                const replacedText = result.replaced_count ? `，覆盖 ${result.replaced_count} 个题集` : '';
+                notify(`导入成功：${result.library_count} 个题集，${result.question_count} 道题${replacedText}`);
+                resetCollectorState();
+                await loadLibraries();
+            } catch (error) {
+                notify(error.message || '导入失败', true);
+            }
+        }
+
+        function applyAdminPageMode() {
+            const mainLayout = $('admin-layout-main');
+            const libraryPanel = $('library-panel');
+            const editorPanel = $('editor-panel');
+            const questionBankPanel = $('question-bank-panel');
+            const questionBankInfo = $('question-bank-info');
+            const collectorListPanel = $('collector-list-panel');
+            const importModal = $('import-modal');
+            const exportModal = $('export-modal');
+
+            setElementHidden(mainLayout, false);
+            setElementHidden(libraryPanel, false);
+            setElementHidden(editorPanel, false);
+            setElementHidden(questionBankPanel, false);
+            setElementHidden(questionBankInfo, false);
+            setElementHidden(collectorListPanel, true);
+            setElementHidden(importModal, !isAdminPage('import'));
+            setElementHidden(exportModal, !isAdminPage('export'));
+
+            if (isAdminPage('question-bank')) {
+                setElementHidden(libraryPanel, true);
+                if ($('editor')) $('editor').classList.add('hidden');
+                if ($('editor-empty')) $('editor-empty').classList.add('hidden');
+                return;
+            }
+
+            if (isAdminPage('library-management')) {
+                setElementHidden(questionBankPanel, true);
+                setElementHidden(questionBankInfo, true);
+                return;
+            }
+
+            if (isAdminPage('collector-list')) {
+                setElementHidden(libraryPanel, true);
+                setElementHidden(editorPanel, true);
+                setElementHidden(questionBankInfo, true);
+                setElementHidden(questionBankPanel, true);
+                setElementHidden(importModal, true);
+                setElementHidden(exportModal, true);
+                setElementHidden(collectorListPanel, false);
+                return;
+            }
+
+            if (isAdminPage('import')) {
+                setElementHidden(libraryPanel, true);
+                setElementHidden(editorPanel, true);
+                setElementHidden(questionBankInfo, true);
+                setElementHidden(questionBankPanel, true);
+                return;
+            }
+
+            if (isAdminPage('export')) {
+                setElementHidden(libraryPanel, true);
+                setElementHidden(editorPanel, true);
+                setElementHidden(questionBankInfo, true);
+                setElementHidden(questionBankPanel, true);
+            }
+        }
 
         function getStoredThemePreference() {
             const raw = localStorage.getItem(THEME_STORAGE_KEY);
@@ -72,17 +634,632 @@ D. My parents object to my going out alone at night.
         }
 
         function getStoredLibraryPanelCollapsed() {
-            if (window.matchMedia('(max-width: 1023px)').matches) {
-                return true;
-            }
-            const raw = localStorage.getItem(LIBRARY_PANEL_COLLAPSE_KEY);
-            if (raw === '1') return true;
-            if (raw === '0') return false;
-            return false;
+            return window.matchMedia('(max-width: 1023px)').matches;
         }
 
         function isMobileViewport() {
             return window.matchMedia('(max-width: 1023px)').matches;
+        }
+
+        function renderSidebarState() {
+            const mobileBtn = $('sidebar-mobile-toggle-btn');
+            const backdrop = $('sidebar-backdrop');
+            const mobile = isMobileViewport();
+
+            document.body.classList.toggle('sidebar-collapsed', !mobile && state.sidebarCollapsed);
+            document.body.classList.toggle('sidebar-mobile-open', mobile && state.sidebarMobileOpen);
+
+            if (mobileBtn) {
+                const opened = mobile && state.sidebarMobileOpen;
+                const label = opened ? '收起菜单' : '展开菜单';
+                mobileBtn.title = label;
+                mobileBtn.setAttribute('aria-label', label);
+                mobileBtn.innerHTML = opened
+                    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>'
+                    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16"></path><path d="M4 12h16"></path><path d="M4 18h16"></path></svg>';
+            }
+
+            if (backdrop) {
+                backdrop.classList.toggle('hidden', !(mobile && state.sidebarMobileOpen));
+            }
+        }
+
+        function setSidebarCollapsed() {
+            state.sidebarCollapsed = true;
+            renderSidebarState();
+        }
+
+        function setSidebarMobileOpen(opened) {
+            state.sidebarMobileOpen = Boolean(opened);
+            renderSidebarState();
+        }
+
+        function toggleSidebarMobile() {
+            setSidebarMobileOpen(!state.sidebarMobileOpen);
+        }
+
+        function syncAdminLayoutMetrics() {
+            const header = $('admin-header');
+            if (!header) return;
+            document.documentElement.style.setProperty('--admin-header-height', `${Math.ceil(header.offsetHeight)}px`);
+        }
+
+        function formatStatCount(value) {
+            const number = Number(value);
+            if (!Number.isFinite(number)) return '0';
+            return number.toLocaleString('zh-CN');
+        }
+
+        function renderDashboardStats() {
+            const totalQuestions = state.libraries.reduce(
+                (sum, lib) => sum + toIntegerOrDefault(lib.question_count, 0),
+                0
+            );
+            const currentQuestionCount = state.currentLibrary?.questions?.length
+                ?? toIntegerOrDefault(state.currentLibrary?.question_count, 0);
+            const currentLibraryTitle = state.currentLibrary?.title || '-';
+
+            if ($('stat-total-questions')) $('stat-total-questions').innerText = formatStatCount(totalQuestions);
+            if ($('stat-library-count')) $('stat-library-count').innerText = formatStatCount(state.libraries.length);
+            if ($('stat-current-library')) $('stat-current-library').innerText = currentLibraryTitle;
+            if ($('stat-current-questions')) $('stat-current-questions').innerText = formatStatCount(currentQuestionCount);
+            renderQuestionBankInfo(totalQuestions);
+        }
+
+        function renderQuestionBankInfo(totalQuestions) {
+            if (!isAdminPage('question-bank')) return;
+            const total = Number.isFinite(totalQuestions) ? totalQuestions : state.libraries.reduce(
+                (sum, lib) => sum + toIntegerOrDefault(lib.question_count, 0),
+                0
+            );
+            const totalInput = $('question-bank-total');
+            const libraryCountInput = $('question-bank-library-count');
+            const refreshInput = $('question-bank-last-refresh');
+            if (totalInput) totalInput.value = formatStatCount(total);
+            if (libraryCountInput) libraryCountInput.value = formatStatCount(state.libraries.length);
+            if (refreshInput) {
+                const refreshText = state.questionBankLastRefresh
+                    ? formatEditTime(state.questionBankLastRefresh)
+                    : '--';
+                refreshInput.value = refreshText;
+            }
+        }
+
+        function renderQuestionBankList() {
+            const root = $('question-bank-list');
+            if (!root) return;
+
+            if (state.questionBankLoading) {
+                root.innerHTML = '<div class="p-4 text-sm text-slate-500">正在加载全部题目...</div>';
+                return;
+            }
+
+            if (!state.questionBankQuestions.length) {
+                root.innerHTML = '<div class="p-4 text-sm text-slate-400">暂无题目</div>';
+                return;
+            }
+
+            const knowledgeMap = new Map();
+            state.questionBankQuestions.forEach((question) => {
+                const raw = String(question.chapter ?? question.knowledge_point ?? '').trim();
+                if (!raw) return;
+                const key = normalizeSearchText(raw);
+                if (!knowledgeMap.has(key)) {
+                    knowledgeMap.set(key, raw);
+                }
+            });
+            const knowledgeOptions = Array.from(knowledgeMap.entries()).sort((a, b) => a[1].localeCompare(b[1], 'zh-CN'));
+            const moveTargetOptions = state.libraries
+                .map((item) => `<option value="${esc(item.id)}">${esc(item.icon)} ${esc(item.title)}</option>`)
+                .join('');
+
+            const total = state.questionBankQuestions.length;
+            const rows = state.questionBankQuestions.map((item, index) => {
+                const questionId = esc(item.id);
+                const qType = normalizeQuestionType(item.type);
+                const answerPreview = formatAnswerForList(qType, item.ans);
+                const answerText = formatAnswerForEditor(qType, item.ans);
+                const chapter = String(item.chapter ?? item.knowledge_point ?? '').trim();
+                const chapterKey = normalizeSearchText(chapter);
+                const difficultyText = getDifficultyText(item.difficulty);
+                const difficultyClass = getDifficultyClass(item.difficulty);
+                const title = esc(String(item.q || '').trim() || `题目 ${questionId}`);
+                const optionsText = Array.isArray(item.options) ? item.options.join('\n') : '';
+                const searchText = [
+                    index + 1,
+                    item.id,
+                    item.q,
+                    (item.options || []).join(' '),
+                    answerPreview,
+                    item.analysis,
+                    item.chapter ?? item.knowledge_point ?? '',
+                    qType,
+                    item.library_title || '',
+                    item.library_id || ''
+                ].join(' ');
+                const libraryOptions = state.libraries.map((lib) => {
+                    const selected = String(lib.id) === String(item.library_id) ? 'selected' : '';
+                    return `<option value="${esc(lib.id)}" ${selected}>${esc(lib.icon)} ${esc(lib.title)}</option>`;
+                }).join('');
+                return `
+                    <tr class="border-b border-slate-100 hover:bg-slate-50/70" data-question-id="${questionId}" data-question-bank-type="${esc(qType)}" data-question-bank-knowledge="${esc(chapterKey)}" data-question-bank-difficulty="${esc(toIntegerOrDefault(item.difficulty, 1))}" data-question-bank-search="${esc(searchText)}">
+                        <td class="py-3 px-3 align-middle">
+                            <input type="checkbox" class="question-bank-row-check rounded border-slate-300" data-question-id="${questionId}">
+                        </td>
+                        <td class="py-3 px-2 align-middle">
+                            <button class="row-expand-btn question-bank-expand-btn w-6 h-6 inline-flex items-center justify-center rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100" data-question-id="${questionId}" title="展开编辑">›</button>
+                        </td>
+                        <td class="py-3 px-2 align-middle whitespace-nowrap">${esc(getQuestionTypeText(qType))}</td>
+                        <td class="py-3 px-2 align-middle whitespace-nowrap">${index + 1}</td>
+                        <td class="py-3 px-2 align-middle max-w-[380px] truncate" title="${title}">${title}</td>
+                        <td class="py-3 px-2 align-middle font-semibold max-w-[180px] truncate" title="${esc(answerPreview || '--')}">${esc(answerPreview || '--')}</td>
+                        <td class="py-3 px-2 align-middle max-w-[160px] truncate" title="${esc(chapter || '--')}">${esc(chapter || '--')}</td>
+                        <td class="py-3 px-2 align-middle whitespace-nowrap ${difficultyClass}">${difficultyText}</td>
+                        <td class="py-3 px-2 align-middle text-slate-400 whitespace-nowrap">${esc(formatEditTime(item.updated_at))}</td>
+                        <td class="py-3 px-2 align-middle whitespace-nowrap">
+                            <button class="delete-question-btn text-rose-600 hover:text-rose-700" data-question-id="${questionId}" data-question-bank="1">删除</button>
+                        </td>
+                    </tr>
+                    <tr class="hidden bg-slate-50/70" data-question-bank-edit-row="${questionId}">
+                        <td colspan="10" class="px-4 py-4">
+                            <div class="question-edit-card question-bank-edit-card border rounded-xl p-4 bg-white" data-question-bank-edit="${questionId}">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <label class="text-sm md:col-span-2">
+                                        <span class="text-slate-500">题目</span>
+                                        <textarea class="qb-question w-full mt-1 px-3 py-2 rounded-lg border" rows="2">${esc(item.q)}</textarea>
+                                    </label>
+                                    <label class="text-sm qb-options-wrap">
+                                        <span class="text-slate-500">选项 每行一个</span>
+                                        <textarea class="qb-options w-full mt-1 px-3 py-2 rounded-lg border" rows="5">${esc(optionsText)}</textarea>
+                                    </label>
+                                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">题型</span>
+                                            <select class="qb-type w-full mt-1 px-3 py-2 rounded-lg border">
+                                                <option value="single" ${qType === 'single' ? 'selected' : ''}>单选题</option>
+                                                <option value="multiple" ${qType === 'multiple' ? 'selected' : ''}>多选题</option>
+                                                <option value="judge" ${qType === 'judge' ? 'selected' : ''}>判断题</option>
+                                                <option value="fill" ${qType === 'fill' ? 'selected' : ''}>填空题</option>
+                                                <option value="qa" ${qType === 'qa' ? 'selected' : ''}>问答题</option>
+                                            </select>
+                                        </label>
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500 qb-answer-label">${getAnswerLabelText(qType)}</span>
+                                            <input type="text" class="qb-answer w-full mt-1 px-3 py-2 rounded-lg border" value="${esc(answerText)}">
+                                        </label>
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">难度</span>
+                                            <input type="number" min="1" class="qb-difficulty w-full mt-1 px-3 py-2 rounded-lg border" value="${esc(item.difficulty)}">
+                                        </label>
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">章节</span>
+                                            <input class="qb-knowledge w-full mt-1 px-3 py-2 rounded-lg border" value="${esc(chapter)}">
+                                        </label>
+                                        <label class="block text-sm sm:col-span-2">
+                                            <span class="text-slate-500">题集</span>
+                                            <select class="qb-library w-full mt-1 px-3 py-2 rounded-lg border">
+                                                ${libraryOptions || '<option value="" disabled>暂无题集</option>'}
+                                            </select>
+                                        </label>
+                                    </div>
+                                    <label class="text-sm md:col-span-2">
+                                        <span class="text-slate-500">解析</span>
+                                        <textarea class="qb-analysis w-full mt-1 px-3 py-2 rounded-lg border" rows="3">${esc(item.analysis)}</textarea>
+                                    </label>
+                                </div>
+                                <div class="flex flex-wrap gap-3 mt-3">
+                                    <button class="ai-generate-btn px-4 py-2 rounded-lg bg-slate-900 text-white font-semibold">AI生成</button>
+                                    <button class="question-bank-save-btn px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold" data-question-id="${questionId}">保存题目</button>
+                                    <button class="question-bank-collapse-btn px-4 py-2 rounded-lg bg-slate-100 text-slate-600 font-semibold" data-question-id="${questionId}">收起</button>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+
+            root.innerHTML = `
+                <div class="flex flex-col gap-3 mb-4">
+                    <div class="question-toolbar flex flex-wrap items-center gap-2">
+                        <div class="question-toolbar-select-row">
+                            <select id="question-bank-type-filter" class="question-toolbar-control px-3 py-2 rounded-lg border text-sm">
+                                <option value="all" ${state.questionBankTypeFilter === 'all' ? 'selected' : ''}>全部题型</option>
+                                <option value="single" ${state.questionBankTypeFilter === 'single' ? 'selected' : ''}>单选题</option>
+                                <option value="multiple" ${state.questionBankTypeFilter === 'multiple' ? 'selected' : ''}>多选题</option>
+                                <option value="judge" ${state.questionBankTypeFilter === 'judge' ? 'selected' : ''}>判断题</option>
+                                <option value="fill" ${state.questionBankTypeFilter === 'fill' ? 'selected' : ''}>填空题</option>
+                                <option value="qa" ${state.questionBankTypeFilter === 'qa' ? 'selected' : ''}>问答题</option>
+                            </select>
+                            <select id="question-bank-knowledge-filter" class="question-toolbar-control px-3 py-2 rounded-lg border text-sm min-w-[150px]">
+                                <option value="all" ${state.questionBankKnowledgeFilter === 'all' ? 'selected' : ''}>全部章节</option>
+                                ${knowledgeOptions.map(([key, label]) => `<option value="${esc(key)}" ${state.questionBankKnowledgeFilter === key ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+                            </select>
+                            <select id="question-bank-difficulty-filter" class="question-toolbar-control px-3 py-2 rounded-lg border text-sm">
+                                <option value="all" ${state.questionBankDifficultyFilter === 'all' ? 'selected' : ''}>全部难度</option>
+                                <option value="1" ${state.questionBankDifficultyFilter === '1' ? 'selected' : ''}>简单</option>
+                                <option value="2" ${state.questionBankDifficultyFilter === '2' ? 'selected' : ''}>适中</option>
+                                <option value="3" ${state.questionBankDifficultyFilter === '3' ? 'selected' : ''}>较难</option>
+                            </select>
+                            <select id="question-bank-batch-action" class="question-toolbar-control question-toolbar-action px-3 py-2 rounded-lg border text-sm">
+                                <option value="" selected disabled hidden>批量操作</option>
+                                <option value="batch-difficulty">修改难度</option>
+                                <option value="batch-knowledge">修改章节</option>
+                                <option value="batch-copy">复制题目</option>
+                                <option value="batch-move">移动题目</option>
+                                <option value="batch-export">导出题目</option>
+                                <option value="delete">删除</option>
+                            </select>
+                        </div>
+                        <select id="question-bank-batch-difficulty" class="question-toolbar-control hidden px-3 py-2 rounded-lg border text-sm">
+                            <option value="1">设为简单</option>
+                            <option value="2">设为适中</option>
+                            <option value="3">设为较难</option>
+                        </select>
+                        <input id="question-bank-batch-knowledge" class="question-toolbar-control hidden px-3 py-2 rounded-lg border text-sm" placeholder="输入章节，留空可清空">
+                        <select id="question-bank-batch-target-library" class="question-toolbar-control hidden px-3 py-2 rounded-lg border text-sm">
+                            <option value="">选择目标题集</option>
+                            ${moveTargetOptions || '<option value="" disabled>暂无可移动题集</option>'}
+                        </select>
+                        <select id="question-bank-batch-export-format" class="question-toolbar-control hidden px-3 py-2 rounded-lg border text-sm">
+                            <option value="json">导出为 JSON</option>
+                            <option value="txt">导出为文档</option>
+                        </select>
+                        <button id="question-bank-batch-run-btn" class="question-toolbar-run px-3 py-2 rounded-lg bg-slate-100 text-slate-600 font-semibold text-sm">执行</button>
+                        <span id="question-bank-selected-hint" class="text-xs text-slate-400 ml-1">已选 0 题</span>
+                        <div class="question-toolbar-search ml-auto flex items-center gap-2 w-full md:w-auto">
+                            <input id="question-bank-search-input" value="${esc(state.questionBankSearch)}" class="w-full md:w-72 px-3 py-2 rounded-lg border" placeholder="请输入题目关键词">
+                            <button id="question-bank-search-btn" title="搜索" aria-label="搜索" class="toolbar-icon-btn bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <circle cx="11" cy="11" r="7"></circle>
+                                    <path d="m20 20-3.5-3.5"></path>
+                                </svg>
+                                <span class="sr-only">搜索</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <h3 class="font-bold mb-3">题目列表</h3>
+                <div class="overflow-x-auto rounded-xl border border-slate-200">
+                    <table class="question-grid-table min-w-[980px] w-full text-sm">
+                        <thead class="bg-slate-50 text-slate-600">
+                            <tr>
+                                <th class="py-3 px-3 text-left w-10"><input id="question-bank-check-all" type="checkbox" class="rounded border-slate-300"></th>
+                                <th class="py-3 px-2 text-left w-10"></th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">题型</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">编号</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">题目</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap w-[180px]">答案</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">章节</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">难易程度</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">编辑时间</th>
+                                <th class="py-3 px-2 text-left whitespace-nowrap">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${rows}
+                        </tbody>
+                    </table>
+                </div>
+                <div id="question-bank-search-empty" class="hidden mt-4 rounded-xl border border-dashed text-center text-sm text-slate-400 py-8">没有匹配的题目</div>
+            `;
+            root.querySelectorAll('.question-bank-edit-card').forEach((card) => updateQuestionBankCardTypeUI(card));
+            updateQuestionBankBatchControls();
+            applyQuestionBankSearch();
+        }
+
+        function updateQuestionBankCardTypeUI(card) {
+            if (!card) return;
+            const typeSelect = card.querySelector('.qb-type');
+            const answerLabel = card.querySelector('.qb-answer-label');
+            const answerInput = card.querySelector('.qb-answer');
+            const optionsInput = card.querySelector('.qb-options');
+            const optionsWrap = card.querySelector('.qb-options-wrap');
+            if (!typeSelect) return;
+
+            const type = normalizeQuestionType(typeSelect.value);
+            if (answerLabel) {
+                answerLabel.innerText = getAnswerLabelText(type);
+            }
+            if (answerInput) {
+                if (type === 'multiple') {
+                    answerInput.placeholder = '如 A,C';
+                } else if (type === 'judge') {
+                    answerInput.placeholder = '如 对 / 正确 / √';
+                } else if (type === 'fill') {
+                    answerInput.placeholder = '多个答案用 | 分隔，如 红楼梦|水浒传';
+                } else if (type === 'qa') {
+                    answerInput.placeholder = '请输入参考答案';
+                } else {
+                    answerInput.placeholder = '如 A';
+                }
+            }
+            if (optionsWrap) {
+                optionsWrap.classList.toggle('hidden', type === 'fill' || type === 'qa');
+            }
+            if (optionsInput) {
+                if (type === 'judge' && !optionsInput.value.trim()) {
+                    optionsInput.value = '正确\n错误';
+                }
+                if (type === 'fill' || type === 'qa') {
+                    optionsInput.value = '';
+                    optionsInput.placeholder = '该题型无需选项';
+                } else {
+                    optionsInput.placeholder = type === 'judge' ? '判断题建议：正确 与 错误 每行一个' : '每行一个选项';
+                }
+            }
+        }
+
+        function setQuestionBankRowExpanded(questionId, expanded) {
+            if (!questionId) return;
+            const row = $('question-bank-list')?.querySelector(`[data-question-bank-edit-row="${questionId}"]`);
+            const button = $('question-bank-list')?.querySelector(`.question-bank-expand-btn[data-question-id="${questionId}"]`);
+            if (!row) return;
+            if (expanded) {
+                row.dataset.expanded = '1';
+                row.classList.remove('hidden');
+                if (button) button.innerText = '⌄';
+            } else {
+                delete row.dataset.expanded;
+                row.classList.add('hidden');
+                if (button) button.innerText = '›';
+            }
+        }
+
+        function toggleQuestionBankRow(questionId) {
+            if (!questionId) return;
+            const listRoot = $('question-bank-list');
+            if (!listRoot) return;
+            const row = listRoot.querySelector(`[data-question-bank-edit-row="${questionId}"]`);
+            if (!row) return;
+            const willExpand = !row.dataset.expanded;
+            listRoot.querySelectorAll('[data-question-bank-edit-row]').forEach((item) => {
+                setQuestionBankRowExpanded(item.dataset.questionBankEditRow, false);
+            });
+            setQuestionBankRowExpanded(questionId, willExpand);
+        }
+
+        function buildQuestionBankPayload(card) {
+            const type = normalizeQuestionType(card.querySelector('.qb-type')?.value || 'single');
+            const optionsInput = card.querySelector('.qb-options');
+            const answerInput = card.querySelector('.qb-answer');
+            const questionInput = card.querySelector('.qb-question');
+            const analysisInput = card.querySelector('.qb-analysis');
+            const difficultyInput = card.querySelector('.qb-difficulty');
+            const knowledgeInput = card.querySelector('.qb-knowledge');
+            const libraryInput = card.querySelector('.qb-library');
+            if (!optionsInput || !answerInput || !questionInput || !analysisInput || !difficultyInput || !knowledgeInput || !libraryInput) {
+                throw new Error('题目编辑区域不完整，请刷新后重试');
+            }
+
+            let options = optionsInput.value
+                .split('\n')
+                .map((item) => item.trim())
+                .filter(Boolean);
+            if (type === 'judge' && options.length === 0) {
+                options = ['正确', '错误'];
+            }
+            if (type === 'fill' || type === 'qa') {
+                options = [];
+            }
+            const answerRaw = answerInput.value.trim();
+
+            return {
+                question: questionInput.value.trim(),
+                type,
+                options,
+                answer: answerRaw,
+                analysis: analysisInput.value.trim(),
+                difficulty: difficultyInput.value.trim() || '1',
+                chapter: knowledgeInput.value.trim(),
+                library_id: libraryInput.value || ''
+            };
+        }
+
+        function applyQuestionBankSearch() {
+            const root = $('question-bank-list');
+            if (!root) return;
+
+            const query = normalizeSearchText(state.questionBankSearch);
+            const selectedType = String(state.questionBankTypeFilter || 'all');
+            const selectedKnowledge = String(state.questionBankKnowledgeFilter || 'all');
+            const selectedDifficulty = String(state.questionBankDifficultyFilter || 'all');
+            const rows = Array.from(root.querySelectorAll('[data-question-id]'));
+            let visibleCount = 0;
+
+            rows.forEach((row) => {
+                const rowType = String(row.dataset.questionBankType || '');
+                const rowKnowledge = String(row.dataset.questionBankKnowledge || '');
+                const rowDifficulty = String(row.dataset.questionBankDifficulty || '');
+                const rowSearch = normalizeSearchText(row.dataset.questionBankSearch || '');
+                const rowId = row.dataset.questionId;
+                const editRow = rowId ? root.querySelector(`[data-question-bank-edit-row="${rowId}"]`) : null;
+                const checkbox = row.querySelector('.question-bank-row-check');
+
+                const typeMatch = selectedType === 'all' || rowType === selectedType;
+                const knowledgeMatch = selectedKnowledge === 'all' || rowKnowledge === selectedKnowledge;
+                const difficultyMatch = selectedDifficulty === 'all' || rowDifficulty === selectedDifficulty;
+                const keywordMatch = !query || rowSearch.includes(query);
+                const matched = typeMatch && knowledgeMatch && difficultyMatch && keywordMatch;
+
+                row.classList.toggle('hidden', !matched);
+                if (editRow) {
+                    editRow.classList.toggle('hidden', !matched || !editRow.dataset.expanded);
+                }
+                if (!matched && checkbox) {
+                    checkbox.checked = false;
+                }
+                if (matched) visibleCount += 1;
+            });
+
+            const totalCount = rows.length;
+            const emptyHint = $('question-bank-search-empty');
+            if (emptyHint) {
+                emptyHint.classList.toggle('hidden', visibleCount !== 0);
+            }
+
+            const checkAll = $('question-bank-check-all');
+            if (checkAll) {
+                const visibleRows = rows.filter((row) => !row.classList.contains('hidden'));
+                const checkedVisible = visibleRows.filter((row) => row.querySelector('.question-bank-row-check')?.checked);
+                checkAll.checked = visibleRows.length > 0 && checkedVisible.length === visibleRows.length;
+            }
+            syncQuestionBankSelectedCount();
+        }
+
+        function getQuestionBankSelectedIds() {
+            return Array.from(document.querySelectorAll('.question-bank-row-check:checked'))
+                .map((input) => input.getAttribute('data-question-id'))
+                .filter(Boolean);
+        }
+
+        function syncQuestionBankSelectedCount() {
+            const checkboxes = Array.from(document.querySelectorAll('.question-bank-row-check'));
+            const checked = checkboxes.filter((item) => item.checked);
+            const label = $('question-bank-selected-hint');
+            if (label) {
+                label.innerText = `已选 ${checked.length} 题`;
+            }
+            const checkAll = $('question-bank-check-all');
+            if (checkAll) {
+                const visible = checkboxes.filter((item) => !item.closest('tr')?.classList.contains('hidden'));
+                checkAll.checked = visible.length > 0 && visible.every((item) => item.checked);
+            }
+        }
+
+        function updateQuestionBankBatchControls() {
+            const action = $('question-bank-batch-action')?.value || '';
+            const difficultyInput = $('question-bank-batch-difficulty');
+            const knowledgeInput = $('question-bank-batch-knowledge');
+            const targetLibraryInput = $('question-bank-batch-target-library');
+            const exportFormatInput = $('question-bank-batch-export-format');
+            const runButton = $('question-bank-batch-run-btn');
+            if (!difficultyInput || !knowledgeInput || !targetLibraryInput || !exportFormatInput) return;
+
+            difficultyInput.classList.toggle('hidden', action !== 'batch-difficulty');
+            knowledgeInput.classList.toggle('hidden', action !== 'batch-knowledge');
+            targetLibraryInput.classList.toggle('hidden', action !== 'batch-move' && action !== 'batch-copy');
+            exportFormatInput.classList.toggle('hidden', action !== 'batch-export');
+            if (runButton) {
+                runButton.innerText = action === 'batch-export' ? '导出' : '执行';
+            }
+        }
+
+        async function batchUpdateQuestionsForLibrary(libraryId, questionIds, changes) {
+            return api('/questions/batch', {
+                method: 'PUT',
+                body: JSON.stringify({
+                    library_id: libraryId,
+                    question_ids: questionIds,
+                    changes
+                })
+            });
+        }
+
+        async function exportQuestionBankSelectedQuestions(questionIds, format) {
+            const selectedSet = new Set(questionIds.map((id) => String(id)));
+            const selectedQuestions = state.questionBankQuestions
+                .filter((item) => selectedSet.has(String(item.id)));
+            if (!selectedQuestions.length) {
+                notify('没有可导出的题目', true);
+                return;
+            }
+
+            const libraryLookup = new Map(state.libraries.map((lib) => [String(lib.id), lib]));
+            const librariesMap = new Map();
+
+            selectedQuestions.forEach((question) => {
+                const libId = String(question.library_id || '');
+                if (!libId) return;
+                if (!librariesMap.has(libId)) {
+                    const libInfo = libraryLookup.get(libId) || {};
+                    librariesMap.set(libId, {
+                        id: libId,
+                        title: libInfo.title || question.library_title || libId,
+                        description: libInfo.description || '',
+                        questions: []
+                    });
+                }
+                const qType = normalizeQuestionType(question.type);
+                let options = Array.isArray(question.options) ? question.options : [];
+                if (qType === 'judge' && options.length < 2) {
+                    options = ['正确', '错误'];
+                }
+                const answer = qType === 'multiple'
+                    ? parseMultipleAnswerForExport(question.ans)
+                    : String(question.ans ?? '');
+                librariesMap.get(libId).questions.push({
+                    question: String(question.q || ''),
+                    type: qType,
+                    options,
+                    answer,
+                    analysis: String(question.analysis || ''),
+                    difficulty: toIntegerOrDefault(question.difficulty, 1),
+                    chapter: String(question.chapter ?? question.knowledge_point ?? '').trim(),
+                    updated_at: String(question.updated_at || '')
+                });
+            });
+
+            const libraries = Array.from(librariesMap.values());
+            const payload = {
+                exported_at: new Date().toISOString(),
+                library_count: libraries.length,
+                question_count: selectedQuestions.length,
+                libraries
+            };
+
+            const normalizedFormat = String(format || 'json').toLowerCase() === 'txt' ? 'txt' : 'json';
+            const txtFields = normalizedFormat === 'txt' ? getExportTxtFields() : [];
+            const extraFieldHint = normalizedFormat === 'txt'
+                ? `，字段：${getExportTxtFieldLabels(txtFields).join('、')}`
+                : '';
+            const ok = await showConfirmDialog({
+                title: '批量导出题目',
+                message: `确认导出已选 ${payload.question_count} 道题为 ${normalizedFormat.toUpperCase()} 吗${extraFieldHint}？`,
+                confirmText: '开始导出'
+            });
+            if (!ok) return;
+
+            const filenameBase = `quiz-export-question-bank-selected-${payload.question_count}`;
+            if (normalizedFormat === 'txt') {
+                const text = buildTxtExportContent(payload, { fields: txtFields });
+                downloadBlob(new Blob([text], { type: 'text/plain; charset=utf-8' }), `${filenameBase}.txt`);
+                notify(`导出成功：${filenameBase}.txt`);
+                return;
+            }
+
+            const jsonText = JSON.stringify(payload, null, 2);
+            downloadBlob(new Blob([jsonText], { type: 'application/json; charset=utf-8' }), `${filenameBase}.json`);
+            notify(`导出成功：${filenameBase}.json`);
+        }
+
+        async function loadQuestionBank() {
+            state.questionBankLoading = true;
+            renderQuestionBankList();
+            try {
+                const keyword = String(state.questionBankKeyword || '').trim();
+                const query = keyword ? `?keyword=${encodeURIComponent(keyword)}` : '';
+                const result = await api(`/questions${query}`);
+                state.questionBankQuestions = Array.isArray(result.questions) ? result.questions : [];
+                state.questionBankLastRefresh = new Date().toISOString();
+            } catch (error) {
+                state.questionBankQuestions = [];
+                notify(`题库加载失败：${error.message}`, true);
+            } finally {
+                state.questionBankLoading = false;
+                renderQuestionBankList();
+                renderQuestionBankInfo();
+            }
+        }
+
+        function applyGlobalSearchKeyword(keyword) {
+            state.questionSearch = String(keyword || '');
+            const questionSearchInput = $('question-search-input');
+            if (questionSearchInput && questionSearchInput.value !== state.questionSearch) {
+                questionSearchInput.value = state.questionSearch;
+            }
+            if (state.currentLibrary) {
+                applyQuestionSearch();
+            }
         }
 
         function renderLibraryPanelState() {
@@ -95,11 +1272,14 @@ D. My parents object to my going out alone at night.
             if (!panel || !list || !toggleBtn) return;
 
             const mobile = isMobileViewport();
+            if (!mobile) {
+                state.libraryListCollapsed = false;
+            }
 
             if (mainLayout) {
-                mainLayout.classList.toggle('layout-sidebar-collapsed', !mobile && state.libraryListCollapsed);
+                mainLayout.classList.remove('layout-sidebar-collapsed');
             }
-            panel.classList.toggle('library-panel-collapsed', !mobile && state.libraryListCollapsed);
+            panel.classList.remove('library-panel-collapsed');
             panel.classList.toggle('library-panel-mobile-open', mobile && !state.libraryListCollapsed);
             list.classList.remove('hidden');
 
@@ -161,7 +1341,10 @@ D. My parents object to my going out alone at night.
                 : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 1 0 9.8 9.8Z"></path></svg>`;
             btn.title = title;
             btn.setAttribute('aria-label', title);
-            btn.innerHTML = `${icon}<span class="sr-only">${title}</span>`;
+            const label = btn.classList.contains('admin-menu-btn')
+                ? '<span>切换主题</span>'
+                : `<span class="sr-only">${title}</span>`;
+            btn.innerHTML = `${icon}${label}`;
         }
 
         function syncThemeMode() {
@@ -206,6 +1389,269 @@ D. My parents object to my going out alone at night.
             return String(answer ?? '');
         }
 
+        function buildAiGeneratePayloadFromCard(card) {
+            const isBank = card.classList.contains('question-bank-edit-card');
+            const prefix = isBank ? 'qb' : 'q';
+            const questionInput = card.querySelector(`.${prefix}-question`);
+            const optionsInput = card.querySelector(`.${prefix}-options`);
+            const typeInput = card.querySelector(`.${prefix}-type`);
+            if (!questionInput || !optionsInput || !typeInput) {
+                throw new Error('题目内容不完整');
+            }
+            const type = normalizeQuestionType(typeInput.value || 'single');
+            let options = optionsInput.value
+                .split('\n')
+                .map((item) => item.trim())
+                .filter(Boolean);
+            if (type === 'judge' && !options.length) {
+                options = ['正确', '错误'];
+            }
+            if (type === 'fill' || type === 'qa') {
+                options = [];
+            }
+            return {
+                question: questionInput.value.trim(),
+                type,
+                options
+            };
+        }
+
+        function applyAiGenerateResult(card, result) {
+            const isBank = card.classList.contains('question-bank-edit-card');
+            const prefix = isBank ? 'qb' : 'q';
+            const answerInput = card.querySelector(`.${prefix}-answer`);
+            const analysisInput = card.querySelector(`.${prefix}-analysis`);
+            const knowledgeInput = card.querySelector(`.${prefix}-knowledge`);
+            if (answerInput && typeof result.answer === 'string' && result.answer.trim()) {
+                answerInput.value = result.answer.trim();
+            }
+            if (analysisInput && typeof result.analysis === 'string' && result.analysis.trim()) {
+                analysisInput.value = result.analysis.trim();
+            }
+            if (knowledgeInput && typeof result.chapter === 'string' && result.chapter.trim()) {
+                knowledgeInput.value = result.chapter.trim();
+            }
+        }
+
+        async function runAiGenerateForPreviewItem({ question, type, options }, button, onApply, optionsArg = {}) {
+            if (!question || !String(question).trim()) {
+                notify('题目不能为空', true);
+                return false;
+            }
+            const silent = Boolean(optionsArg.silent);
+            try {
+                if (button) {
+                    button.disabled = true;
+                    button.dataset.loading = '1';
+                    button.innerText = '生成中...';
+                }
+                const result = await api('/ai-generate', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        question: String(question).trim(),
+                        type: normalizeQuestionType(type || 'single'),
+                        options: Array.isArray(options) ? options : []
+                    })
+                });
+                if (onApply) onApply(result || {});
+                if (!silent) {
+                    notify('AI 生成完成');
+                }
+                return true;
+            } catch (error) {
+                if (!silent) {
+                    notify(error.message || 'AI 生成失败', true);
+                }
+                return false;
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.dataset.loading = '0';
+                    button.innerText = 'AI生成';
+                }
+            }
+        }
+
+        function shouldAiGenerateItem(item) {
+            const answerEmpty = !item?.answer || !String(item.answer).trim();
+            const analysisEmpty = !item?.analysis || !String(item.analysis).trim();
+            const chapterEmpty = !item?.chapter || !String(item.chapter).trim();
+            return answerEmpty || analysisEmpty || chapterEmpty;
+        }
+
+        async function runBatchAiGenerateItems(tasks, applyResult, onProgress, buttonLabel) {
+            const total = tasks.length;
+            let completed = 0;
+            let successCount = 0;
+            for (let i = 0; i < total; i += AI_BATCH_CHUNK_SIZE) {
+                const slice = tasks.slice(i, i + AI_BATCH_CHUNK_SIZE);
+                if (onProgress) onProgress(Math.min(i + slice.length, total), total);
+                const response = await api('/ai-generate-batch', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        items: slice.map((task) => ({
+                            question: task.item.question,
+                            type: task.item.type,
+                            options: task.item.options
+                        }))
+                    })
+                });
+                const items = Array.isArray(response?.items) ? response.items : [];
+                slice.forEach((task, idx) => {
+                    const result = items[idx] || {};
+                    applyResult(task, result);
+                    if (result.answer || result.analysis || result.chapter) {
+                        successCount += 1;
+                    }
+                    completed += 1;
+                });
+                if (onProgress) onProgress(completed, total);
+            }
+            if (buttonLabel) {
+                buttonLabel(successCount, total);
+            }
+            return successCount;
+        }
+
+        async function runBatchAiGenerateCollector(button) {
+            if (!state.collectorPayload) {
+                notify('暂无可生成的题目', true);
+                return;
+            }
+            const tasks = [];
+            state.collectorPayload.libraries.forEach((lib, libIndex) => {
+                (lib.questions || []).forEach((item, questionIndex) => {
+                    if (!item?.question) return;
+                    if (shouldAiGenerateItem(item)) {
+                        tasks.push({ libIndex, questionIndex, item });
+                    }
+                });
+            });
+            if (!tasks.length) {
+                notify('没有需要生成的题目');
+                return;
+            }
+            if (button) {
+                button.disabled = true;
+            }
+            const successCount = await runBatchAiGenerateItems(
+                tasks,
+                (task, result) => {
+                    if (result.answer) task.item.answer = result.answer;
+                    if (result.analysis) task.item.analysis = result.analysis;
+                    if (result.chapter) task.item.chapter = result.chapter;
+                },
+                (completed, total) => {
+                    if (button) button.innerText = `生成中 ${completed}/${total}`;
+                }
+            );
+            if (button) {
+                button.disabled = false;
+                button.innerText = '批量AI生成';
+            }
+            renderCollectorPreview(state.collectorPayload, state.collectorFilename);
+            notify(`批量生成完成：${successCount} 道题`);
+        }
+
+        async function runBatchAiGenerateImportJson(button) {
+            if (!state.importJsonPayload) {
+                notify('暂无可生成的题目', true);
+                return;
+            }
+            const tasks = [];
+            state.importJsonPayload.libraries.forEach((lib, libIndex) => {
+                (lib.questions || []).forEach((item, questionIndex) => {
+                    if (!item?.question) return;
+                    if (shouldAiGenerateItem(item)) {
+                        tasks.push({ libIndex, questionIndex, item });
+                    }
+                });
+            });
+            if (!tasks.length) {
+                notify('没有需要生成的题目');
+                return;
+            }
+            if (button) button.disabled = true;
+            const successCount = await runBatchAiGenerateItems(
+                tasks,
+                (task, result) => {
+                    if (result.answer) task.item.answer = result.answer;
+                    if (result.analysis) task.item.analysis = result.analysis;
+                    if (result.chapter) task.item.chapter = result.chapter;
+                },
+                (completed, total) => {
+                    if (button) button.innerText = `生成中 ${completed}/${total}`;
+                }
+            );
+            if (button) {
+                button.disabled = false;
+                button.innerText = '批量AI生成';
+            }
+            renderImportJsonPreview();
+            notify(`批量生成完成：${successCount} 道题`);
+        }
+
+        async function runBatchAiGenerateImportDoc(button) {
+            if (!state.importDocQuestions.length) {
+                notify('暂无可生成的题目', true);
+                return;
+            }
+            const tasks = state.importDocQuestions
+                .map((item, index) => ({ item, index }))
+                .filter(({ item }) => item?.question && shouldAiGenerateItem(item));
+            if (!tasks.length) {
+                notify('没有需要生成的题目');
+                return;
+            }
+            if (button) button.disabled = true;
+            const successCount = await runBatchAiGenerateItems(
+                tasks,
+                (task, result) => {
+                    if (result.answer) task.item.answer = result.answer;
+                    if (result.analysis) task.item.analysis = result.analysis;
+                    if (result.chapter) task.item.chapter = result.chapter;
+                },
+                (completed, total) => {
+                    if (button) button.innerText = `生成中 ${completed}/${total}`;
+                }
+            );
+            if (button) {
+                button.disabled = false;
+                button.innerText = '批量AI生成';
+            }
+            renderImportDocPreview();
+            notify(`批量生成完成：${successCount} 道题`);
+        }
+
+        async function runAiGenerateForCard(card, button) {
+            try {
+                const payload = buildAiGeneratePayloadFromCard(card);
+                if (!payload.question) {
+                    notify('题目不能为空', true);
+                    return;
+                }
+                if (button) {
+                    button.disabled = true;
+                    button.dataset.loading = '1';
+                    button.innerText = '生成中...';
+                }
+                const result = await api('/ai-generate', {
+                    method: 'POST',
+                    body: JSON.stringify(payload)
+                });
+                applyAiGenerateResult(card, result || {});
+                notify('AI 生成完成');
+            } catch (error) {
+                notify(error.message || 'AI 生成失败', true);
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.dataset.loading = '0';
+                    button.innerText = 'AI生成';
+                }
+            }
+        }
+
         function getQuestionTypeText(type) {
             const normalized = normalizeQuestionType(type);
             if (normalized === 'multiple') return '多选题';
@@ -213,6 +1659,59 @@ D. My parents object to my going out alone at night.
             if (normalized === 'fill') return '填空题';
             if (normalized === 'qa') return '问答题';
             return '单选题';
+        }
+
+        function normalizeQuestionForImport(raw, normalizeOptions = {}) {
+            if (!raw) return null;
+            const allowEmptyAnswer = Boolean(normalizeOptions.allowEmptyAnswer);
+            const question = String(raw.question || raw.q || '').trim();
+            if (!question) return null;
+            const type = normalizeQuestionType(raw.type || 'single');
+            let questionOptions = Array.isArray(raw.options) ? raw.options : [];
+            questionOptions = questionOptions.map((item) => String(item ?? '').trim()).filter(Boolean);
+            if (type === 'judge' && questionOptions.length === 0) {
+                questionOptions = ['正确', '错误'];
+            }
+            if (type === 'fill' || type === 'qa') {
+                questionOptions = [];
+            }
+            const answer = String(raw.answer ?? raw.ans ?? '').trim();
+            if (!answer && !allowEmptyAnswer) return null;
+            if ((type === 'single' || type === 'multiple') && questionOptions.length < 2) return null;
+            return {
+                question,
+                type,
+                options: questionOptions,
+                answer,
+                analysis: String(raw.analysis || '').trim(),
+                difficulty: toIntegerOrDefault(raw.difficulty, 1),
+                chapter: String(raw.chapter || raw.knowledge_point || '').trim()
+            };
+        }
+
+        function filterLibrariesForImport(payload, options = {}) {
+            const libs = payload.libraries || [];
+            const filtered = [];
+            let total = 0;
+            let ready = 0;
+            libs.forEach((lib) => {
+                const questions = Array.isArray(lib.questions) ? lib.questions : [];
+                total += questions.length;
+                const readyQuestions = questions
+                    .map((question) => normalizeQuestionForImport(question, options))
+                    .filter(Boolean);
+                ready += readyQuestions.length;
+                if (readyQuestions.length) {
+                    filtered.push({
+                        id: lib.id,
+                        title: lib.title,
+                        icon: lib.icon,
+                        description: lib.description,
+                        questions: readyQuestions
+                    });
+                }
+            });
+            return { libraries: filtered, total, ready };
         }
 
         function getDifficultyText(rawDifficulty) {
@@ -374,11 +1873,6 @@ D. My parents object to my going out alone at night.
             });
 
             const totalCount = rows.length;
-            const countLabel = $('question-count-label');
-            if (countLabel) {
-                countLabel.innerText = `题目列表 显示 ${visibleCount} / ${totalCount} 题`;
-            }
-
             const emptyHint = $('question-search-empty');
             if (emptyHint) {
                 emptyHint.classList.toggle('hidden', visibleCount !== 0);
@@ -400,6 +1894,40 @@ D. My parents object to my going out alone at night.
                 if (['id', 'title', 'questions'].some((key) => key in payload)) return [payload];
             }
             throw new Error('JSON 顶层需为题集数组，或包含 libraries 字段');
+        }
+
+        function normalizeImportOptions(raw) {
+            if (Array.isArray(raw)) {
+                return raw.map((item) => String(item ?? '').trim()).filter(Boolean);
+            }
+            if (typeof raw === 'string') {
+                return raw.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+            }
+            return [];
+        }
+
+        function normalizeImportPayload(payload) {
+            const libraries = parseImportLibraries(payload);
+            return {
+                libraries: libraries.map((lib) => {
+                    const questions = Array.isArray(lib.questions) ? lib.questions : [];
+                    return {
+                        id: String(lib.id || '').trim(),
+                        title: String(lib.title || '未命名题集').trim(),
+                        icon: String(lib.icon || '📚').trim() || '📚',
+                        description: String(lib.description || '').trim(),
+                        questions: questions.map((q) => ({
+                            question: String(q.question || q.q || '').trim(),
+                            type: normalizeQuestionType(q.type || 'single'),
+                            options: normalizeImportOptions(q.options || q.opts || []),
+                            answer: q.answer ?? q.ans ?? '',
+                            analysis: q.analysis ?? '',
+                            difficulty: toIntegerOrDefault(q.difficulty, 1),
+                            chapter: String(q.chapter || q.knowledge_point || '').trim()
+                        }))
+                    };
+                })
+            };
         }
 
         function getImportTargetLibraryId() {
@@ -440,15 +1968,19 @@ D. My parents object to my going out alone at night.
             renderImportLibrarySelect('import-single-library');
             switchImportTab(defaultTab);
             $('import-modal').classList.remove('hidden');
-            $('import-modal').classList.add('flex');
             renderImportJsonPreview();
             renderImportDocPreview();
             updateSingleImportTypeUI();
         }
 
         function closeImportModal() {
+            if (isAdminPage('import')) {
+                resetImportWorkflowState();
+                renderImportJsonPreview();
+                renderImportDocPreview();
+                return;
+            }
             $('import-modal').classList.add('hidden');
-            $('import-modal').classList.remove('flex');
         }
 
         function normalizeExportTxtFields(rawFields) {
@@ -590,12 +2122,27 @@ D. My parents object to my going out alone at night.
             refreshExportModalState(state.currentLibrary?.id || '__all__');
             switchExportTab(defaultTab);
             $('export-modal').classList.remove('hidden');
-            $('export-modal').classList.add('flex');
         }
 
         function closeExportModal() {
+            if (isAdminPage('export')) {
+                refreshExportModalState(state.currentLibrary?.id || '__all__');
+                return;
+            }
             $('export-modal').classList.add('hidden');
-            $('export-modal').classList.remove('flex');
+        }
+
+        function maybeOpenStandaloneModal() {
+            if (hasAutoOpenedStandaloneModal) return;
+            if (isAdminPage('import')) {
+                hasAutoOpenedStandaloneModal = true;
+                openImportEntry('json');
+                return;
+            }
+            if (isAdminPage('export')) {
+                hasAutoOpenedStandaloneModal = true;
+                openExportEntry('json');
+            }
         }
 
         function renderImportJsonPreview() {
@@ -610,25 +2157,116 @@ D. My parents object to my going out alone at night.
                 previewRoot.innerHTML = `<p class="text-rose-600">${esc(preview.error)}</p>`;
                 return;
             }
+            if (!state.importJsonPayload) {
+                previewRoot.innerHTML = '<p>预览数据为空，请重新选择文件。</p>';
+                return;
+            }
 
-            const cards = preview.libraries.slice(0, 8).map((lib, index) => `
-                <article class="import-preview-card">
-                    <h5>${index + 1}. ${esc(lib.title || '未命名题集')}</h5>
-                    <p>ID: ${esc(lib.id || '自动生成')}</p>
-                    <p>题目数: ${lib.questionCount}</p>
-                </article>
-            `).join('');
-            const extraText = preview.libraries.length > 8
-                ? `<p class="mt-2 text-xs text-slate-400">其余 ${preview.libraries.length - 8} 个题集将在导入时一并处理。</p>`
-                : '';
+            const payload = state.importJsonPayload;
+            const totalQuestions = payload.libraries.reduce((sum, lib) => sum + lib.questions.length, 0);
+            const typeOptions = [
+                { value: 'single', label: '单选题' },
+                { value: 'multiple', label: '多选题' },
+                { value: 'judge', label: '判断题' },
+                { value: 'fill', label: '填空题' },
+                { value: 'qa', label: '问答题' }
+            ];
+
+            const libsHtml = payload.libraries.map((lib, libIndex) => {
+                const questionsHtml = lib.questions.map((q, qIndex) => {
+                    const key = `${libIndex}-${qIndex}`;
+                    const isExpanded = Boolean(state.previewExpanded.importJson[key]);
+                    const summary = `${getQuestionTypeText(q.type)} · ${Array.isArray(q.options) ? q.options.length : 0} 选项`;
+                    return `
+                        <article class="import-edit-card border rounded-xl p-3 bg-slate-50/70" data-import-json-lib="${libIndex}" data-import-json-question="${qIndex}">
+                            <div class="import-row flex items-center gap-3">
+                                <button type="button" class="import-json-expand-btn text-xs font-semibold px-2 py-1 rounded-lg bg-slate-100 text-slate-600" data-import-json-lib="${libIndex}" data-import-json-question="${qIndex}">
+                                    ${isExpanded ? '收起' : '展开'}
+                                </button>
+                                <div class="flex-1 min-w-0">
+                                    <div class="text-sm font-semibold text-slate-700 truncate">${esc(q.question || `题目 ${qIndex + 1}`)}</div>
+                                    <div class="text-xs text-slate-400">${esc(summary)}</div>
+                                </div>
+                                <button type="button" class="import-json-ai-btn text-xs font-semibold px-2 py-1 rounded-lg bg-slate-900 text-white" data-import-json-lib="${libIndex}" data-import-json-question="${qIndex}">AI生成</button>
+                                <button type="button" class="import-json-delete-btn text-rose-600 text-xs font-semibold" data-import-json-lib="${libIndex}" data-import-json-question="${qIndex}">删除</button>
+                            </div>
+                            ${isExpanded ? `
+                                <div class="mt-3 border-t border-slate-200/70 pt-3">
+                                    <label class="block text-sm mb-3">
+                                        <span class="text-slate-500">题目</span>
+                                        <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[88px]" data-import-json-field="question">${esc(q.question)}</textarea>
+                                    </label>
+                                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">题型</span>
+                                            <select class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-import-json-field="type">
+                                                ${typeOptions.map((item) => `<option value="${item.value}" ${q.type === item.value ? 'selected' : ''}>${item.label}</option>`).join('')}
+                                            </select>
+                                        </label>
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">难度</span>
+                                            <input type="number" min="1" max="5" class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-import-json-field="difficulty" value="${esc(String(q.difficulty || 1))}">
+                                        </label>
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">章节</span>
+                                            <input class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-import-json-field="chapter" value="${esc(q.chapter || '')}">
+                                        </label>
+                                    </div>
+                                    <label class="block text-sm mb-3">
+                                        <span class="text-slate-500">选项（每行一个）</span>
+                                        <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[88px]" data-import-json-field="options">${esc(q.options.join('\n'))}</textarea>
+                                    </label>
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">${getAnswerLabelText(q.type)}</span>
+                                            <input class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-import-json-field="answer" value="${esc(formatAnswerForEditor(q.type, q.answer))}">
+                                        </label>
+                                        <label class="block text-sm">
+                                            <span class="text-slate-500">解析</span>
+                                            <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[88px]" data-import-json-field="analysis">${esc(String(q.analysis || ''))}</textarea>
+                                        </label>
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </article>
+                    `;
+                }).join('');
+
+                return `
+                    <section class="import-edit-lib border rounded-xl p-4 bg-white/95">
+                        <div class="flex flex-wrap items-center gap-3 mb-3">
+                            <label class="block text-xs">
+                                <span class="text-slate-500">题集名称</span>
+                                <input class="mt-1 px-3 py-2 rounded-lg border bg-white text-sm" data-import-json-lib-field="title" data-import-json-lib="${libIndex}" value="${esc(lib.title)}">
+                            </label>
+                            <label class="block text-xs">
+                                <span class="text-slate-500">题集 ID</span>
+                                <input class="mt-1 px-3 py-2 rounded-lg border bg-white text-sm" data-import-json-lib-field="id" data-import-json-lib="${libIndex}" value="${esc(lib.id || '')}">
+                            </label>
+                            <label class="block text-xs">
+                                <span class="text-slate-500">图标</span>
+                                <input class="mt-1 px-3 py-2 rounded-lg border bg-white text-sm w-24" data-import-json-lib-field="icon" data-import-json-lib="${libIndex}" value="${esc(lib.icon || '📚')}">
+                            </label>
+                        </div>
+                        <label class="block text-sm mb-3">
+                            <span class="text-slate-500">题集描述</span>
+                            <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[70px]" data-import-json-lib-field="description" data-import-json-lib="${libIndex}">${esc(lib.description || '')}</textarea>
+                        </label>
+                        <div class="text-xs text-slate-400 mb-3">共 ${lib.questions.length} 题</div>
+                        <div class="space-y-3">${questionsHtml || '<div class="text-sm text-slate-400">暂无题目</div>'}</div>
+                    </section>
+                `;
+            }).join('');
 
             previewRoot.innerHTML = `
-                <div class="mb-3 text-sm">
-                    <p>共检测到 <strong>${preview.libraryCount}</strong> 个题集，<strong>${preview.questionCount}</strong> 道题。</p>
-                    <p class="text-xs text-slate-400 mt-1">文件：${esc(preview.filename || '')}</p>
+                <div class="mb-3 text-sm flex flex-wrap items-center gap-2 justify-between">
+                    <div>
+                        <p>共检测到 <strong>${payload.libraries.length}</strong> 个题集，<strong>${totalQuestions}</strong> 道题。</p>
+                        <p class="text-xs text-slate-400 mt-1">文件：${esc(preview.filename || '')}</p>
+                    </div>
+                    <button type="button" class="import-json-ai-batch px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold">批量AI生成</button>
                 </div>
-                <div class="import-preview-list">${cards}</div>
-                ${extraText}
+                <div class="space-y-4">${libsHtml}</div>
             `;
         }
 
@@ -963,23 +2601,82 @@ D. My parents object to my going out alone at night.
                 return;
             }
 
-            const sample = state.importDocQuestions.slice(0, 6).map((item, index) => `
-                <article class="import-preview-card">
-                    <h5>${index + 1}. ${esc(item.question)}</h5>
-                    <p>题型：${getQuestionTypeText(item.type)} | 答案：${esc(item.answer)}</p>
-                    <p>选项数：${item.options.length} | 难度：${item.difficulty}</p>
-                </article>
-            `).join('');
-            const rest = state.importDocQuestions.length > 6
-                ? `<p class="mt-2 text-xs text-slate-400">其余 ${state.importDocQuestions.length - 6} 道题将在导入时一并提交。</p>`
-                : '';
+            const typeOptions = [
+                { value: 'single', label: '单选题' },
+                { value: 'multiple', label: '多选题' },
+                { value: 'judge', label: '判断题' },
+                { value: 'fill', label: '填空题' },
+                { value: 'qa', label: '问答题' }
+            ];
+
+            const questionsHtml = state.importDocQuestions.map((q, index) => {
+                const key = String(index);
+                const isExpanded = Boolean(state.previewExpanded.importDoc[key]);
+                const summary = `${getQuestionTypeText(normalizeQuestionType(q.type))} · ${Array.isArray(q.options) ? q.options.length : 0} 选项`;
+                return `
+                    <article class="import-edit-card border rounded-xl p-3 bg-slate-50/70" data-import-doc-question="${index}">
+                        <div class="import-row flex items-center gap-3">
+                            <button type="button" class="import-doc-expand-btn text-xs font-semibold px-2 py-1 rounded-lg bg-slate-100 text-slate-600" data-import-doc-question="${index}">
+                                ${isExpanded ? '收起' : '展开'}
+                            </button>
+                            <div class="flex-1 min-w-0">
+                                <div class="text-sm font-semibold text-slate-700 truncate">${esc(q.question || `题目 ${index + 1}`)}</div>
+                                <div class="text-xs text-slate-400">${esc(summary)}</div>
+                            </div>
+                            <button type="button" class="import-doc-ai-btn text-xs font-semibold px-2 py-1 rounded-lg bg-slate-900 text-white" data-import-doc-question="${index}">AI生成</button>
+                            <button type="button" class="import-doc-delete-btn text-rose-600 text-xs font-semibold" data-import-doc-question="${index}">删除</button>
+                        </div>
+                        ${isExpanded ? `
+                            <div class="mt-3 border-t border-slate-200/70 pt-3">
+                                <label class="block text-sm mb-3">
+                                    <span class="text-slate-500">题目</span>
+                                    <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[88px]" data-import-doc-field="question">${esc(q.question)}</textarea>
+                                </label>
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                                    <label class="block text-sm">
+                                        <span class="text-slate-500">题型</span>
+                                        <select class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-import-doc-field="type">
+                                            ${typeOptions.map((item) => `<option value="${item.value}" ${normalizeQuestionType(q.type) === item.value ? 'selected' : ''}>${item.label}</option>`).join('')}
+                                        </select>
+                                    </label>
+                                    <label class="block text-sm">
+                                        <span class="text-slate-500">难度</span>
+                                        <input type="number" min="1" max="5" class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-import-doc-field="difficulty" value="${esc(String(q.difficulty || 1))}">
+                                    </label>
+                                    <label class="block text-sm">
+                                        <span class="text-slate-500">章节</span>
+                                        <input class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-import-doc-field="chapter" value="${esc(q.chapter || '')}">
+                                    </label>
+                                </div>
+                                <label class="block text-sm mb-3">
+                                    <span class="text-slate-500">选项（每行一个）</span>
+                                    <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[88px]" data-import-doc-field="options">${esc((q.options || []).join('\n'))}</textarea>
+                                </label>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <label class="block text-sm">
+                                        <span class="text-slate-500">${getAnswerLabelText(normalizeQuestionType(q.type))}</span>
+                                        <input class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" data-import-doc-field="answer" value="${esc(formatAnswerForEditor(normalizeQuestionType(q.type), q.answer))}">
+                                    </label>
+                                    <label class="block text-sm">
+                                        <span class="text-slate-500">解析</span>
+                                        <textarea class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[88px]" data-import-doc-field="analysis">${esc(String(q.analysis || ''))}</textarea>
+                                    </label>
+                                </div>
+                            </div>
+                        ` : ''}
+                    </article>
+                `;
+            }).join('');
+
             previewRoot.innerHTML = `
-                <div class="mb-3 text-sm">
-                    <p>共识别 <strong>${state.importDocQuestions.length}</strong> 道题。</p>
-                    ${state.importDocLastFilename ? `<p class="text-xs text-slate-400 mt-1">来源：${esc(state.importDocLastFilename)}</p>` : ''}
+                <div class="mb-3 text-sm flex flex-wrap items-center gap-2 justify-between">
+                    <div>
+                        <p>共识别 <strong>${state.importDocQuestions.length}</strong> 道题。</p>
+                        ${state.importDocLastFilename ? `<p class="text-xs text-slate-400 mt-1">来源：${esc(state.importDocLastFilename)}</p>` : ''}
+                    </div>
+                    <button type="button" class="import-doc-ai-batch px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold">批量AI生成</button>
                 </div>
-                <div class="import-preview-list">${sample}</div>
-                ${rest}
+                <div class="space-y-3">${questionsHtml}</div>
             `;
         }
 
@@ -1296,6 +2993,7 @@ D. My parents object to my going out alone at night.
             $('new-lib-title').value = '';
             $('new-lib-icon').value = '📚';
             $('new-lib-description').value = '';
+            if ($('new-lib-public')) $('new-lib-public').checked = true;
             $('create-library-modal').classList.remove('hidden');
             $('create-library-modal').classList.add('flex');
             $('new-lib-title').focus();
@@ -1308,38 +3006,68 @@ D. My parents object to my going out alone at night.
 
         function renderLibraryList() {
             const container = $('library-list');
+            const filterSelect = $('library-visibility-filter');
+            const filterValue = state.libraryVisibilityFilter === 'public' || state.libraryVisibilityFilter === 'private'
+                ? state.libraryVisibilityFilter
+                : 'all';
+            if (filterSelect && filterSelect.value !== filterValue) {
+                filterSelect.value = filterValue;
+            }
+            const visibleLibraries = state.libraries.filter((lib) => {
+                if (filterValue === 'public') return lib?.is_public !== false;
+                if (filterValue === 'private') return lib?.is_public === false;
+                return true;
+            });
+
             if (!state.libraries.length) {
-                container.innerHTML = '<div class="text-sm text-slate-400 text-center py-10">暂无题集，点击右上角新建</div>';
+                container.innerHTML = '<div class="text-sm text-slate-400 text-center py-8 w-full">暂无题集，点击新建题集</div>';
                 renderLibraryPanelState();
                 return;
             }
 
-            container.innerHTML = state.libraries.map((lib) => {
+            if (!visibleLibraries.length) {
+                container.innerHTML = '<div class="text-sm text-slate-400 text-center py-8 w-full">当前筛选下暂无题集</div>';
+                renderLibraryPanelState();
+                return;
+            }
+
+            const cards = visibleLibraries.map((lib) => {
                 const active = state.currentLibrary && state.currentLibrary.id === lib.id;
+                const visibility = lib.is_public === false ? '私有' : '公开';
                 return `
-                    <button data-lib-id="${esc(lib.id)}" class="library-item-btn w-full text-left border rounded-xl p-3 hover:border-indigo-400 transition ${
-                        active ? 'bg-indigo-50 border-indigo-400' : 'bg-white border-slate-200'
-                    }">
-                        <div class="library-item-main flex items-center justify-between">
-                            <div class="library-item-info flex items-center gap-2">
-                                <span class="library-item-icon text-xl">${esc(lib.icon)}</span>
-                                <div class="library-item-text">
-                                    <div class="font-semibold text-sm">${esc(lib.title)}</div>
-                                    <div class="text-xs text-slate-400">${esc(lib.id)}</div>
-                                </div>
-                            </div>
-                            <span class="library-item-count text-xs px-2 py-1 rounded-full bg-slate-100 text-slate-500">${lib.question_count}题</span>
-                        </div>
+                    <button
+                        type="button"
+                        data-lib-id="${esc(lib.id)}"
+                        title="${esc(lib.title)} (${esc(lib.id)}) · ${visibility}"
+                        class="library-compact-btn border transition ${active ? 'is-active' : ''}"
+                    >
+                        <span class="library-compact-icon">${esc(lib.icon || '📚')}</span>
+                        <span class="library-compact-title">${esc(lib.title)}</span>
+                        ${lib.is_public === false ? '<span class="text-[10px] text-slate-400">🔒</span>' : ''}
                     </button>
                 `;
             }).join('');
+
+            container.innerHTML = `
+                <div class="library-compact-grid">${cards}</div>
+            `;
             renderLibraryPanelState();
         }
 
         function renderEditor() {
+            if (!isAdminPage('library-management')) {
+                $('editor').classList.add('hidden');
+                $('editor-empty').classList.add('hidden');
+                renderDashboardStats();
+                applyAdminPageMode();
+                return;
+            }
+
             if (!state.currentLibrary) {
                 $('editor').classList.add('hidden');
                 $('editor-empty').classList.remove('hidden');
+                renderDashboardStats();
+                applyAdminPageMode();
                 return;
             }
 
@@ -1380,6 +3108,10 @@ D. My parents object to my going out alone at night.
                         <label class="text-sm md:col-span-3">
                             <span class="text-slate-500">题集介绍</span>
                             <textarea id="lib-description" class="w-full mt-1 px-3 py-2 rounded-lg border" rows="3" placeholder="填写题集介绍，展示在选择模式页面">${esc(lib.description || '')}</textarea>
+                        </label>
+                        <label class="inline-flex items-center gap-2 text-sm md:col-span-3 cursor-pointer">
+                            <input id="lib-is-public" type="checkbox" class="rounded border-slate-300" ${lib.is_public === false ? '' : 'checked'}>
+                            <span class="text-slate-500">公开题集（关闭后仅后台可见）</span>
                         </label>
                     </div>
                     <div class="mt-4 flex gap-3">
@@ -1438,19 +3170,16 @@ D. My parents object to my going out alone at night.
                             <span id="question-selected-hint" class="text-xs text-slate-400 ml-1">已选 0 题</span>
                             <div class="question-toolbar-search ml-auto flex items-center gap-2 w-full md:w-auto">
                                 <input id="question-search-input" value="${esc(state.questionSearch)}" class="w-full md:w-72 px-3 py-2 rounded-lg border" placeholder="请输入题目关键词">
-                                <button id="clear-question-search-btn" title="清空搜索" aria-label="清空搜索" class="toolbar-icon-btn bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300">
+                                <button id="question-search-btn" title="搜索" aria-label="搜索" class="toolbar-icon-btn bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                        <path d="M3 6h18"></path>
-                                        <path d="M8 6V4h8v2"></path>
-                                        <path d="M6 6l1 14h10l1-14"></path>
-                                        <path d="M10 11v6"></path>
-                                        <path d="M14 11v6"></path>
+                                        <circle cx="11" cy="11" r="7"></circle>
+                                        <path d="m20 20-3.5-3.5"></path>
                                     </svg>
-                                    <span class="sr-only">清空搜索</span>
+                                    <span class="sr-only">搜索</span>
                                 </button>
                             </div>
                         </div>
-                        <h3 id="question-count-label" class="font-bold">题目列表 显示 ${lib.questions.length} / ${lib.questions.length} 题</h3>
+                        <h3 id="question-count-label" class="font-bold">题目列表</h3>
                     </div>
                     <div class="overflow-x-auto rounded-xl border border-slate-200">
                         <table class="question-grid-table min-w-[980px] w-full text-sm">
@@ -1547,7 +3276,8 @@ D. My parents object to my going out alone at night.
                                                         <textarea class="q-analysis w-full mt-1 px-3 py-2 rounded-lg border" rows="3">${esc(q.analysis)}</textarea>
                                                     </label>
                                                 </div>
-                                                <div class="flex gap-3 mt-3">
+                                                <div class="flex flex-wrap gap-3 mt-3">
+                                                    <button class="ai-generate-btn px-4 py-2 rounded-lg bg-slate-900 text-white font-semibold">AI生成</button>
                                                     <button class="save-question-btn px-4 py-2 rounded-lg bg-indigo-600 text-white font-semibold">保存题目</button>
                                                     <button class="collapse-question-btn px-4 py-2 rounded-lg bg-slate-100 text-slate-600 font-semibold" data-question-id="${q.id}">收起</button>
                                                 </div>
@@ -1562,10 +3292,15 @@ D. My parents object to my going out alone at night.
                     <div id="question-search-empty" class="hidden mt-4 rounded-xl border border-dashed text-center text-sm text-slate-400 py-8">没有匹配的题目</div>
                 </div>
             `;
+            if ($('admin-global-search-input') && $('admin-global-search-input').value !== state.questionSearch) {
+                $('admin-global-search-input').value = state.questionSearch;
+            }
             $('editor').querySelectorAll('.question-edit-card').forEach((card) => updateQuestionCardTypeUI(card));
             updateBatchActionControls();
             applyQuestionSearch();
             syncSelectedQuestionCount();
+            renderDashboardStats();
+            applyAdminPageMode();
         }
 
         async function loadLibraries(preferredLibraryId) {
@@ -1578,12 +3313,16 @@ D. My parents object to my going out alone at night.
                     renderImportLibrarySelect('import-doc-library');
                     renderImportLibrarySelect('import-single-library');
                     refreshExportModalState('__all__');
+                    renderDashboardStats();
+                    await loadQuestionBank();
                     return;
                 }
 
                 const currentId = preferredLibraryId || (state.currentLibrary && state.currentLibrary.id) || state.libraries[0].id;
                 renderLibraryList();
                 await selectLibrary(currentId);
+                renderDashboardStats();
+                await loadQuestionBank();
             } catch (error) {
                 notify(error.message, true);
             }
@@ -1604,6 +3343,7 @@ D. My parents object to my going out alone at night.
                 renderImportLibrarySelect('import-doc-library', libraryId);
                 renderImportLibrarySelect('import-single-library', libraryId);
                 refreshExportModalState(libraryId);
+                renderDashboardStats();
             } catch (error) {
                 notify(error.message, true);
             }
@@ -1818,6 +3558,9 @@ D. My parents object to my going out alone at night.
         $('create-library-btn').addEventListener('click', async () => {
             openCreateLibraryModal();
         });
+        $('create-library-header-btn')?.addEventListener('click', async () => {
+            openCreateLibraryModal();
+        });
         $('create-library-collapsed-btn')?.addEventListener('click', async () => {
             openCreateLibraryModal();
         });
@@ -1825,6 +3568,7 @@ D. My parents object to my going out alone at night.
         async function inspectImportJsonFile(file) {
             state.importJsonFile = file || null;
             state.importJsonPreview = null;
+            state.importJsonPayload = null;
             $('import-json-file-name').innerText = file ? file.name : '未选择文件';
             if (!file) {
                 renderImportJsonPreview();
@@ -1834,22 +3578,16 @@ D. My parents object to my going out alone at night.
             try {
                 const text = await file.text();
                 const payload = JSON.parse(text);
-                const libraries = parseImportLibraries(payload);
-                const summary = libraries.map((lib, index) => {
-                    const questions = Array.isArray(lib?.questions) ? lib.questions : [];
-                    return {
-                        index: index + 1,
-                        id: String(lib?.id || '').trim(),
-                        title: String(lib?.title || '').trim(),
-                        questionCount: questions.length
-                    };
-                });
+                const normalized = normalizeImportPayload(payload);
+                const questionCount = normalized.libraries.reduce((sum, lib) => sum + lib.questions.length, 0);
+                state.importJsonPayload = normalized;
                 state.importJsonPreview = {
                     filename: file.name,
-                    libraryCount: summary.length,
-                    questionCount: summary.reduce((sum, item) => sum + item.questionCount, 0),
-                    libraries: summary
+                    libraryCount: normalized.libraries.length,
+                    questionCount
                 };
+                state.previewCollapsed.importJson = true;
+                state.previewExpanded.importJson = {};
             } catch (error) {
                 state.importJsonPreview = {
                     error: `文件检查失败：${error.message || '请确认 JSON 格式'}`
@@ -1859,25 +3597,62 @@ D. My parents object to my going out alone at night.
         }
 
         async function submitJsonImport() {
-            if (!state.importJsonFile) {
+            if (!state.importJsonFile && !state.importJsonPayload) {
                 notify('请先选择 JSON 文件', true);
                 return;
             }
             const replaceExisting = $('import-json-replace').checked;
+            const allowEmptyAnswer = $('import-json-allow-empty-answer')?.checked ?? true;
+            const sourcePayload = state.importJsonPayload;
+            if (sourcePayload) {
+                const { total, ready } = filterLibrariesForImport(sourcePayload, { allowEmptyAnswer });
+                if (!ready) {
+                    notify(
+                        allowEmptyAnswer
+                            ? '没有可导入的题目（题目为空或选择题缺少选项）'
+                            : '没有可导入的题目（需填写答案与选项）',
+                        true
+                    );
+                    return;
+                }
+                if (ready < total) {
+                    const ok = await showConfirmDialog({
+                        title: '导入题库 JSON',
+                        message: allowEmptyAnswer
+                            ? `共有 ${total} 道题，其中 ${ready} 道可导入（其余题目为空或选择题缺少选项）。确认先导入可导入题目吗？`
+                            : `共有 ${total} 道题，其中 ${ready} 道已完整可导入。确认先导入已完成题目吗？`,
+                        confirmText: '先导入可导入题目'
+                    });
+                    if (!ok) return;
+                }
+            }
+            const filenameLabel = state.importJsonFile?.name || '编辑后的 JSON';
             const confirmed = await showConfirmDialog({
                 title: '导入题库 JSON',
                 message: replaceExisting
-                    ? `确认导入「${state.importJsonFile.name}」并覆盖同 ID 题集吗？`
-                    : `确认导入「${state.importJsonFile.name}」吗？若 ID 冲突会报错。`,
+                    ? `确认导入「${filenameLabel}」并覆盖同 ID 题集吗？`
+                    : `确认导入「${filenameLabel}」吗？若 ID 冲突会报错。`,
                 confirmText: '开始导入'
             });
             if (!confirmed) return;
 
             const formData = new FormData();
-            formData.append('file', state.importJsonFile);
+            if (state.importJsonPayload) {
+                const filtered = filterLibrariesForImport(state.importJsonPayload, { allowEmptyAnswer });
+                const filteredPayload = filtered.libraries.length
+                    ? { libraries: filtered.libraries }
+                    : state.importJsonPayload;
+                const payloadText = JSON.stringify(filteredPayload, null, 2);
+                const blob = new Blob([payloadText], { type: 'application/json' });
+                const filename = state.importJsonFile?.name || 'import.json';
+                formData.append('file', new File([blob], filename, { type: 'application/json' }));
+            } else {
+                formData.append('file', state.importJsonFile);
+            }
             if (replaceExisting) {
                 formData.append('replace_existing', '1');
             }
+            formData.append('allow_empty_answer', allowEmptyAnswer ? '1' : '0');
 
             try {
                 const result = await api('/import-json', {
@@ -1908,6 +3683,8 @@ D. My parents object to my going out alone at night.
             }
             try {
                 state.importDocQuestions = parseQuestionDocument(source);
+                state.previewCollapsed.importDoc = true;
+                state.previewExpanded.importDoc = {};
             } catch (error) {
                 state.importDocParseError = error.message || '解析失败，请检查格式';
             }
@@ -1925,16 +3702,32 @@ D. My parents object to my going out alone at night.
                 return;
             }
 
+            const readyQuestions = state.importDocQuestions
+                .map(normalizeQuestionForImport)
+                .filter(Boolean);
+            if (!readyQuestions.length) {
+                notify('没有可导入的题目（需填写答案与选项）', true);
+                return;
+            }
+            if (readyQuestions.length < state.importDocQuestions.length) {
+                const okPartial = await showConfirmDialog({
+                    title: '导入解析结果',
+                    message: `共有 ${state.importDocQuestions.length} 道题，其中 ${readyQuestions.length} 道已完整可导入。确认先导入已完成题目吗？`,
+                    confirmText: '先导入已完成题目'
+                });
+                if (!okPartial) return;
+            }
+
             const ok = await showConfirmDialog({
                 title: '导入解析结果',
-                message: `确认导入 ${state.importDocQuestions.length} 道题到题集「${libraryId}」吗？`,
+                message: `确认导入 ${readyQuestions.length} 道题到题集「${libraryId}」吗？`,
                 confirmText: '开始导入'
             });
             if (!ok) return;
 
             let importedCount = 0;
             try {
-                for (const question of state.importDocQuestions) {
+                for (const question of readyQuestions) {
                     await api(`/libraries/${encodeURIComponent(libraryId)}/questions`, {
                         method: 'POST',
                         body: JSON.stringify({
@@ -2004,18 +3797,40 @@ D. My parents object to my going out alone at night.
             updateSingleImportTypeUI();
         }
 
-        $('import-json-btn').addEventListener('click', () => {
+        function resetImportWorkflowState() {
             state.importJsonFile = null;
             state.importJsonPreview = null;
+            state.importJsonPayload = null;
             state.importDocQuestions = [];
             state.importDocParseError = '';
             state.importDocLastFilename = '';
+            state.previewCollapsed.importJson = true;
+            state.previewCollapsed.importDoc = true;
+            state.previewExpanded.importJson = {};
+            state.previewExpanded.importDoc = {};
             $('import-json-replace').checked = false;
+            $('import-json-allow-empty-answer').checked = true;
             $('import-json-file-name').innerText = '未选择文件';
             $('import-doc-file-name').innerText = '可直接粘贴文本';
             $('import-doc-text').value = '';
             resetSingleImportForm();
-            openImportModal('json');
+        }
+
+        function openImportEntry(defaultTab = 'json') {
+            resetImportWorkflowState();
+            openImportModal(defaultTab);
+        }
+
+        function openExportEntry(defaultTab = 'json') {
+            openExportModal(defaultTab);
+        }
+
+        $('import-json-btn')?.addEventListener('click', () => {
+            if (!isAdminPage('import')) {
+                window.location.href = '/admin/import';
+                return;
+            }
+            openImportEntry('json');
         });
 
         $('import-tab-bar').addEventListener('click', (event) => {
@@ -2025,10 +3840,7 @@ D. My parents object to my going out alone at night.
             switchImportTab(tab);
         });
 
-        $('import-modal-close-btn').addEventListener('click', closeImportModal);
-        $('import-modal').addEventListener('click', (event) => {
-            if (event.target === $('import-modal')) closeImportModal();
-        });
+        $('import-modal-close-btn')?.addEventListener('click', closeImportModal);
         $('import-json-cancel-btn').addEventListener('click', closeImportModal);
         $('import-doc-cancel-btn').addEventListener('click', closeImportModal);
         $('import-single-cancel-btn').addEventListener('click', closeImportModal);
@@ -2084,8 +3896,12 @@ D. My parents object to my going out alone at night.
         $('import-single-type').addEventListener('change', updateSingleImportTypeUI);
         $('import-single-submit-btn').addEventListener('click', submitSingleImport);
 
-        $('export-json-btn').addEventListener('click', () => {
-            openExportModal('json');
+        $('export-json-btn')?.addEventListener('click', () => {
+            if (!isAdminPage('export')) {
+                window.location.href = '/admin/export';
+                return;
+            }
+            openExportEntry('json');
         });
 
         $('export-tab-bar').addEventListener('click', (event) => {
@@ -2094,10 +3910,7 @@ D. My parents object to my going out alone at night.
             const tab = btn.getAttribute('data-export-tab') || 'json';
             switchExportTab(tab);
         });
-        $('export-modal-close-btn').addEventListener('click', closeExportModal);
-        $('export-modal').addEventListener('click', (event) => {
-            if (event.target === $('export-modal')) closeExportModal();
-        });
+        $('export-modal-close-btn')?.addEventListener('click', closeExportModal);
         $('export-json-cancel-btn').addEventListener('click', closeExportModal);
         $('export-txt-cancel-btn').addEventListener('click', closeExportModal);
         $('export-json-library').addEventListener('change', () => renderExportPreview('json'));
@@ -2126,8 +3939,271 @@ D. My parents object to my going out alone at night.
         });
 
         $('refresh-btn').addEventListener('click', async () => {
+            if (isAdminPage('collector-list')) {
+                await loadCollectorRecordList();
+                notify('采集列表已刷新');
+                return;
+            }
             await loadLibraries();
             notify('已刷新');
+        });
+        $('collector-list-refresh-btn')?.addEventListener('click', async () => {
+            await loadCollectorRecordList();
+            notify('采集列表已刷新');
+        });
+        $('collector-list-root')?.addEventListener('click', async (event) => {
+            const copyBtn = event.target.closest('.collector-record-copy-btn');
+            if (copyBtn) {
+                const answer = String(copyBtn.getAttribute('data-answer') || '').trim();
+                if (!answer) {
+                    notify('该记录没有答案可复制', true);
+                    return;
+                }
+                try {
+                    if (navigator.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(answer);
+                        notify('答案已复制');
+                    } else {
+                        notify('当前环境不支持剪贴板复制', true);
+                    }
+                } catch (error) {
+                    notify(error.message || '复制失败', true);
+                }
+                return;
+            }
+
+            const deleteBtn = event.target.closest('.collector-record-delete-btn');
+            if (deleteBtn) {
+                const recordId = String(deleteBtn.getAttribute('data-record-id') || '').trim();
+                if (!recordId) return;
+                const ok = await showConfirmDialog({
+                    title: '删除采集记录',
+                    message: '确认删除该采集记录吗？同来源的题目记录会一起移除。',
+                    confirmText: '确认删除',
+                    confirmType: 'danger'
+                });
+                if (!ok) return;
+                try {
+                    await api(`/collector-records/${encodeURIComponent(recordId)}`, { method: 'DELETE' });
+                    await loadCollectorRecordList();
+                    notify('采集记录已删除');
+                } catch (error) {
+                    notify(error.message || '删除失败', true);
+                }
+            }
+        });
+        $('question-bank-refresh-btn')?.addEventListener('click', async () => {
+            await loadQuestionBank();
+            notify('题库已刷新');
+        });
+        $('question-bank-list')?.addEventListener('click', async (event) => {
+            const target = event.target;
+            if (target.id === 'question-bank-search-btn' || target.closest('#question-bank-search-btn')) {
+                const input = $('question-bank-search-input');
+                const keyword = String(input?.value || '').trim();
+                state.questionBankKeyword = keyword;
+                state.questionBankSearch = keyword;
+                await loadQuestionBank();
+                if (input) input.focus();
+                return;
+            }
+            if (target.id === 'question-bank-batch-run-btn') {
+                const action = $('question-bank-batch-action')?.value || '';
+                const selectedIds = getQuestionBankSelectedIds();
+                if (!selectedIds.length) {
+                    notify('请先选择题目', true);
+                    return;
+                }
+                const selectedSet = new Set(selectedIds.map((id) => String(id)));
+                const grouped = new Map();
+                state.questionBankQuestions.forEach((item) => {
+                    const id = String(item.id);
+                    if (!selectedSet.has(id)) return;
+                    const libId = String(item.library_id || '');
+                    if (!libId) return;
+                    if (!grouped.has(libId)) grouped.set(libId, []);
+                    grouped.get(libId).push(item.id);
+                });
+
+                if (action === 'batch-export') {
+                    const exportFormat = $('question-bank-batch-export-format')?.value || 'json';
+                    await exportQuestionBankSelectedQuestions(selectedIds, exportFormat);
+                    return;
+                }
+
+                if (action === 'delete') {
+                    const ok = await showConfirmDialog({
+                        title: '删除题目',
+                        message: `确认删除已选 ${selectedIds.length} 道题吗？`,
+                        confirmText: '确认删除',
+                        confirmType: 'danger'
+                    });
+                    if (!ok) return;
+                    try {
+                        await Promise.all(selectedIds.map((id) => api(`/questions/${id}`, { method: 'DELETE' })));
+                        notify('题目已删除');
+                        await loadLibraries(state.currentLibrary?.id);
+                    } catch (error) {
+                        notify(error.message, true);
+                    }
+                    return;
+                }
+
+                if (!grouped.size) {
+                    notify('所选题目缺少题集信息', true);
+                    return;
+                }
+
+                try {
+                    if (action === 'batch-difficulty') {
+                        const difficulty = $('question-bank-batch-difficulty')?.value || '1';
+                        await Promise.all(Array.from(grouped.entries()).map(([libId, ids]) => (
+                            batchUpdateQuestionsForLibrary(libId, ids, { difficulty })
+                        )));
+                        notify('批量修改完成');
+                        await loadLibraries(state.currentLibrary?.id);
+                        return;
+                    }
+                    if (action === 'batch-knowledge') {
+                        const knowledgePoint = ($('question-bank-batch-knowledge')?.value || '').trim();
+                        await Promise.all(Array.from(grouped.entries()).map(([libId, ids]) => (
+                            batchUpdateQuestionsForLibrary(libId, ids, { chapter: knowledgePoint })
+                        )));
+                        notify('批量修改完成');
+                        await loadLibraries(state.currentLibrary?.id);
+                        return;
+                    }
+                    if (action === 'batch-copy') {
+                        const targetLibraryId = $('question-bank-batch-target-library')?.value || '';
+                        if (!targetLibraryId) {
+                            notify('请选择目标题集', true);
+                            return;
+                        }
+                        await Promise.all(Array.from(grouped.entries()).map(([libId, ids]) => (
+                            batchUpdateQuestionsForLibrary(libId, ids, { copy_to_library_id: targetLibraryId })
+                        )));
+                        notify('批量复制完成');
+                        await loadLibraries(state.currentLibrary?.id);
+                        return;
+                    }
+                    if (action === 'batch-move') {
+                        const targetLibraryId = $('question-bank-batch-target-library')?.value || '';
+                        if (!targetLibraryId) {
+                            notify('请选择目标题集', true);
+                            return;
+                        }
+                        await Promise.all(Array.from(grouped.entries()).map(([libId, ids]) => (
+                            batchUpdateQuestionsForLibrary(libId, ids, { target_library_id: targetLibraryId })
+                        )));
+                        notify('批量移动完成');
+                        await loadLibraries(state.currentLibrary?.id);
+                    }
+                } catch (error) {
+                    notify(error.message, true);
+                }
+                return;
+            }
+            if (target.classList.contains('question-bank-expand-btn')) {
+                const questionId = target.getAttribute('data-question-id');
+                toggleQuestionBankRow(questionId);
+                return;
+            }
+            if (target.classList.contains('question-bank-collapse-btn')) {
+                const questionId = target.getAttribute('data-question-id');
+                setQuestionBankRowExpanded(questionId, false);
+                return;
+            }
+            if (target.classList.contains('question-bank-save-btn')) {
+                const card = target.closest('.question-bank-edit-card');
+                const questionId = target.getAttribute('data-question-id') || card?.getAttribute('data-question-bank-edit');
+                if (!card || !questionId) return;
+                try {
+                    await api(`/questions/${questionId}`, {
+                        method: 'PUT',
+                        body: JSON.stringify(buildQuestionBankPayload(card))
+                    });
+                    notify('题目已保存');
+                    await loadLibraries(state.currentLibrary?.id);
+                } catch (error) {
+                    notify(error.message, true);
+                }
+                return;
+            }
+            if (target.classList.contains('ai-generate-btn')) {
+                const card = target.closest('.question-bank-edit-card');
+                if (!card) return;
+                await runAiGenerateForCard(card, target);
+                return;
+            }
+            if (target.classList.contains('delete-question-btn')) {
+                const questionId = target.getAttribute('data-question-id') || target.closest('[data-question-id]')?.getAttribute('data-question-id');
+                if (!questionId) return;
+                const ok = await showConfirmDialog({
+                    title: '删除题目',
+                    message: '确认删除这道题吗？',
+                    confirmText: '确认删除',
+                    confirmType: 'danger'
+                });
+                if (!ok) return;
+                try {
+                    await api(`/questions/${questionId}`, { method: 'DELETE' });
+                    notify('题目已删除');
+                    await loadLibraries(state.currentLibrary?.id);
+                } catch (error) {
+                    notify(error.message, true);
+                }
+            }
+        });
+        $('question-bank-list')?.addEventListener('keydown', (event) => {
+            if (event.target.id !== 'question-bank-search-input') return;
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            const input = event.target;
+            const keyword = String(input?.value || '').trim();
+            state.questionBankKeyword = keyword;
+            state.questionBankSearch = keyword;
+            loadQuestionBank();
+        });
+
+        $('question-bank-list')?.addEventListener('change', (event) => {
+            const target = event.target;
+            if (target.classList.contains('qb-type')) {
+                const card = target.closest('.question-bank-edit-card');
+                updateQuestionBankCardTypeUI(card);
+                return;
+            }
+            if (target.id === 'question-bank-type-filter') {
+                state.questionBankTypeFilter = target.value || 'all';
+                applyQuestionBankSearch();
+                return;
+            }
+            if (target.id === 'question-bank-knowledge-filter') {
+                state.questionBankKnowledgeFilter = target.value || 'all';
+                applyQuestionBankSearch();
+                return;
+            }
+            if (target.id === 'question-bank-difficulty-filter') {
+                state.questionBankDifficultyFilter = target.value || 'all';
+                applyQuestionBankSearch();
+                return;
+            }
+            if (target.id === 'question-bank-batch-action') {
+                updateQuestionBankBatchControls();
+                return;
+            }
+            if (target.id === 'question-bank-check-all') {
+                const checked = target.checked;
+                $('question-bank-list')?.querySelectorAll('[data-question-id]').forEach((row) => {
+                    if (row.classList.contains('hidden')) return;
+                    const checkbox = row.querySelector('.question-bank-row-check');
+                    if (checkbox) checkbox.checked = checked;
+                });
+                syncQuestionBankSelectedCount();
+                return;
+            }
+            if (target.classList.contains('question-bank-row-check')) {
+                syncQuestionBankSelectedCount();
+            }
         });
 
         $('toggle-library-list-btn').addEventListener('click', () => {
@@ -2138,6 +4214,12 @@ D. My parents object to my going out alone at night.
         });
         $('library-panel-backdrop')?.addEventListener('click', () => {
             setLibraryListCollapsed(true);
+        });
+        $('sidebar-mobile-toggle-btn')?.addEventListener('click', () => {
+            toggleSidebarMobile();
+        });
+        $('sidebar-backdrop')?.addEventListener('click', () => {
+            setSidebarMobileOpen(false);
         });
 
         $('logout-btn').addEventListener('click', async () => {
@@ -2163,6 +4245,7 @@ D. My parents object to my going out alone at night.
             const title = $('new-lib-title').value.trim();
             const icon = $('new-lib-icon').value.trim() || '📚';
             const description = $('new-lib-description').value.trim();
+            const isPublic = $('new-lib-public')?.checked ?? true;
             if (!title) {
                 notify('题集名称不能为空', true);
                 return;
@@ -2170,7 +4253,7 @@ D. My parents object to my going out alone at night.
             try {
                 const created = await api('/libraries', {
                     method: 'POST',
-                    body: JSON.stringify({ title, icon, description })
+                    body: JSON.stringify({ title, icon, description, is_public: isPublic })
                 });
                 closeCreateLibraryModal();
                 notify('题集已创建');
@@ -2178,6 +4261,25 @@ D. My parents object to my going out alone at night.
             } catch (error) {
                 notify(error.message, true);
             }
+        });
+
+        $('library-visibility-filter')?.addEventListener('change', async (event) => {
+            const value = String(event.target?.value || 'all').trim();
+            state.libraryVisibilityFilter = ['all', 'public', 'private'].includes(value) ? value : 'all';
+            const visibleLibraries = state.libraries.filter((lib) => {
+                if (state.libraryVisibilityFilter === 'public') return lib?.is_public !== false;
+                if (state.libraryVisibilityFilter === 'private') return lib?.is_public === false;
+                return true;
+            });
+            if (
+                state.currentLibrary
+                && !visibleLibraries.some((lib) => lib.id === state.currentLibrary.id)
+                && visibleLibraries.length
+            ) {
+                await selectLibrary(visibleLibraries[0].id);
+                return;
+            }
+            renderLibraryList();
         });
 
         $('library-list').addEventListener('click', async (event) => {
@@ -2195,14 +4297,12 @@ D. My parents object to my going out alone at night.
             if (!state.currentLibrary) return;
             const target = event.target;
 
-            if (target.id === 'clear-question-search-btn') {
-                state.questionSearch = '';
+            if (target.id === 'question-search-btn' || target.closest('#question-search-btn')) {
                 const searchInput = $('question-search-input');
-                if (searchInput) {
-                    searchInput.value = '';
-                    searchInput.focus();
-                }
+                const keyword = String(searchInput?.value || '').trim();
+                state.questionSearch = keyword;
                 applyQuestionSearch();
+                if (searchInput) searchInput.focus();
                 return;
             }
 
@@ -2211,10 +4311,11 @@ D. My parents object to my going out alone at night.
                 const title = $('lib-title').value.trim();
                 const icon = $('lib-icon').value.trim();
                 const description = $('lib-description').value.trim();
+                const isPublic = $('lib-is-public')?.checked ?? true;
                 try {
                     const updated = await api(`/libraries/${state.currentLibrary.id}`, {
                         method: 'PUT',
-                        body: JSON.stringify({ id: libraryId, title, icon, description })
+                        body: JSON.stringify({ id: libraryId, title, icon, description, is_public: isPublic })
                     });
                     notify('题集信息已保存');
                     await loadLibraries(updated?.id || libraryId || state.currentLibrary.id);
@@ -2368,6 +4469,13 @@ D. My parents object to my going out alone at night.
                 return;
             }
 
+            if (target.classList.contains('ai-generate-btn')) {
+                const card = target.closest('.question-edit-card') || target.closest('[data-question-id]');
+                if (!card) return;
+                await runAiGenerateForCard(card, target);
+                return;
+            }
+
             if (target.classList.contains('save-question-btn')) {
                 const card = target.closest('.question-edit-card') || target.closest('[data-question-id]');
                 const questionId = card?.getAttribute('data-question-id');
@@ -2404,12 +4512,16 @@ D. My parents object to my going out alone at night.
                 }
             }
         });
-
-        $('editor').addEventListener('input', (event) => {
+        $('editor').addEventListener('keydown', (event) => {
             if (event.target.id !== 'question-search-input') return;
-            state.questionSearch = event.target.value;
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            const searchInput = event.target;
+            const keyword = String(searchInput?.value || '').trim();
+            state.questionSearch = keyword;
             applyQuestionSearch();
         });
+
 
         $('editor').addEventListener('change', (event) => {
             const target = event.target;
@@ -2467,22 +4579,319 @@ D. My parents object to my going out alone at night.
             if (!$('export-modal').classList.contains('hidden')) {
                 closeExportModal();
             }
+            if (!$('settings-modal').classList.contains('hidden')) {
+                closeSettingsModal();
+            }
             if (isMobileViewport() && !state.libraryListCollapsed) {
                 setLibraryListCollapsed(true);
+            }
+            if (isMobileViewport() && state.sidebarMobileOpen) {
+                setSidebarMobileOpen(false);
             }
         });
 
         (async function init() {
             document.body.dataset.themePreference = getStoredThemePreference();
             syncThemeMode();
+            syncAdminLayoutMetrics();
             readExportTxtFieldsFromControls();
             setLibraryListCollapsed(getStoredLibraryPanelCollapsed(), false);
+            setSidebarCollapsed();
+            setSidebarMobileOpen(false);
             if ($('theme-toggle')) {
                 $('theme-toggle').addEventListener('click', toggleThemeMode);
             }
             if ($('settings-btn')) {
-                $('settings-btn').addEventListener('click', () => {
-                    notify('系统设置功能即将上线');
+                $('settings-btn').addEventListener('click', openSettingsModal);
+            }
+            if ($('settings-close-btn')) {
+                $('settings-close-btn').addEventListener('click', closeSettingsModal);
+            }
+            if ($('settings-cancel-btn')) {
+                $('settings-cancel-btn').addEventListener('click', closeSettingsModal);
+            }
+            if ($('settings-save-btn')) {
+                $('settings-save-btn').addEventListener('click', saveAiSettings);
+            }
+            if ($('settings-test-btn')) {
+                $('settings-test-btn').addEventListener('click', testAiConnection);
+            }
+            if ($('settings-backdrop')) {
+                $('settings-backdrop').addEventListener('click', closeSettingsModal);
+            }
+            if ($('collector-pick-btn')) {
+                $('collector-pick-btn').addEventListener('click', () => {
+                    $('collector-file-input')?.click();
+                });
+            }
+            if ($('collector-file-input')) {
+                $('collector-file-input').addEventListener('change', (event) => {
+                    const file = event.target.files && event.target.files[0];
+                    state.collectorFile = file || null;
+                    state.collectorFilename = file ? file.name : '';
+                    if ($('collector-file-name')) {
+                        $('collector-file-name').innerText = file ? file.name : '未选择文件';
+                    }
+                    state.collectorPayload = null;
+                    state.collectorPreview = null;
+                    if ($('collector-import-btn')) $('collector-import-btn').disabled = true;
+                    if ($('collector-preview')) {
+                        $('collector-preview').innerText = file ? '已选择文件，点击“开始识别”。' : '请上传题目文件后识别';
+                    }
+                    if (!file) resetCollectorState();
+                });
+            }
+            if ($('collector-run-btn')) {
+                $('collector-run-btn').addEventListener('click', runCollector);
+            }
+            if ($('collector-import-btn')) {
+                $('collector-import-btn').addEventListener('click', importCollectorPayload);
+            }
+            if ($('collector-reset-btn')) {
+                $('collector-reset-btn').addEventListener('click', resetCollectorState);
+            }
+            if ($('collector-preview')) {
+                $('collector-preview').addEventListener('input', (event) => {
+                    const target = event.target;
+                    if (!state.collectorPayload) return;
+                    const field = target.getAttribute('data-collector-field');
+                    const libField = target.getAttribute('data-collector-lib-field');
+                    if (!field && !libField) return;
+                    const libIndex = Number(target.closest('[data-collector-lib]')?.getAttribute('data-collector-lib') || target.getAttribute('data-collector-lib'));
+                    if (Number.isNaN(libIndex) || !state.collectorPayload.libraries[libIndex]) return;
+                    if (libField) {
+                        const value = target.value || '';
+                        state.collectorPayload.libraries[libIndex][libField] = value;
+                        return;
+                    }
+                    const questionIndex = Number(target.closest('[data-collector-question]')?.getAttribute('data-collector-question'));
+                    if (Number.isNaN(questionIndex)) return;
+                    const question = state.collectorPayload.libraries[libIndex].questions[questionIndex];
+                    if (!question) return;
+                    if (field === 'options') {
+                        question.options = String(target.value || '')
+                            .split(/\r?\n/)
+                            .map((item) => item.trim())
+                            .filter(Boolean);
+                    } else if (field === 'type') {
+                        question.type = normalizeQuestionType(target.value || 'single');
+                    } else if (field === 'difficulty') {
+                        question.difficulty = toIntegerOrDefault(target.value, 1);
+                    } else {
+                        question[field] = target.value;
+                    }
+                });
+                $('collector-preview').addEventListener('change', (event) => {
+                    const target = event.target;
+                    if (target.getAttribute('data-collector-field') === 'type') {
+                        renderCollectorPreview(state.collectorPayload, state.collectorFilename);
+                    }
+                });
+                $('collector-preview').addEventListener('click', async (event) => {
+                    const expandBtn = event.target.closest('.collector-expand-btn');
+                    if (expandBtn) {
+                        const libIndex = Number(expandBtn.getAttribute('data-collector-lib'));
+                        const questionIndex = Number(expandBtn.getAttribute('data-collector-question'));
+                        if (!Number.isNaN(libIndex) && !Number.isNaN(questionIndex)) {
+                            const key = `${libIndex}-${questionIndex}`;
+                            state.previewExpanded.collector[key] = !state.previewExpanded.collector[key];
+                            renderCollectorPreview(state.collectorPayload, state.collectorFilename);
+                        }
+                        return;
+                    }
+                    const batchBtn = event.target.closest('.collector-ai-batch');
+                    if (batchBtn) {
+                        await runBatchAiGenerateCollector(batchBtn);
+                        return;
+                    }
+                    const aiBtn = event.target.closest('.collector-ai-btn');
+                    if (aiBtn && state.collectorPayload) {
+                        const libIndex = Number(aiBtn.getAttribute('data-collector-lib'));
+                        const questionIndex = Number(aiBtn.getAttribute('data-collector-question'));
+                        const lib = state.collectorPayload.libraries[libIndex];
+                        const item = lib?.questions?.[questionIndex];
+                        if (!item) return;
+                        await runAiGenerateForPreviewItem(
+                            { question: item.question, type: item.type, options: item.options },
+                            aiBtn,
+                            (result) => {
+                                if (result.answer) item.answer = result.answer;
+                                if (result.analysis) item.analysis = result.analysis;
+                                if (result.chapter) item.chapter = result.chapter;
+                            }
+                        );
+                        renderCollectorPreview(state.collectorPayload, state.collectorFilename);
+                        return;
+                    }
+                    const btn = event.target.closest('.collector-delete-btn');
+                    if (!btn || !state.collectorPayload) return;
+                    const libIndex = Number(btn.getAttribute('data-collector-lib'));
+                    const questionIndex = Number(btn.getAttribute('data-collector-question'));
+                    if (Number.isNaN(libIndex) || Number.isNaN(questionIndex)) return;
+                    const lib = state.collectorPayload.libraries[libIndex];
+                    if (!lib || !Array.isArray(lib.questions)) return;
+                    lib.questions.splice(questionIndex, 1);
+                    state.previewExpanded.collector = {};
+                    renderCollectorPreview(state.collectorPayload, state.collectorFilename);
+                });
+            }
+            if ($('import-json-preview')) {
+                $('import-json-preview').addEventListener('input', (event) => {
+                    const target = event.target;
+                    if (!state.importJsonPayload) return;
+                    const field = target.getAttribute('data-import-json-field');
+                    const libField = target.getAttribute('data-import-json-lib-field');
+                    if (!field && !libField) return;
+                    const libIndex = Number(target.closest('[data-import-json-lib]')?.getAttribute('data-import-json-lib') || target.getAttribute('data-import-json-lib'));
+                    if (Number.isNaN(libIndex) || !state.importJsonPayload.libraries[libIndex]) return;
+                    if (libField) {
+                        state.importJsonPayload.libraries[libIndex][libField] = target.value || '';
+                        return;
+                    }
+                    const questionIndex = Number(target.closest('[data-import-json-question]')?.getAttribute('data-import-json-question'));
+                    if (Number.isNaN(questionIndex)) return;
+                    const question = state.importJsonPayload.libraries[libIndex].questions[questionIndex];
+                    if (!question) return;
+                    if (field === 'options') {
+                        question.options = String(target.value || '')
+                            .split(/\r?\n/)
+                            .map((item) => item.trim())
+                            .filter(Boolean);
+                    } else if (field === 'type') {
+                        question.type = normalizeQuestionType(target.value || 'single');
+                    } else if (field === 'difficulty') {
+                        question.difficulty = toIntegerOrDefault(target.value, 1);
+                    } else {
+                        question[field] = target.value;
+                    }
+                });
+                $('import-json-preview').addEventListener('change', (event) => {
+                    const target = event.target;
+                    if (target.getAttribute('data-import-json-field') === 'type') {
+                        renderImportJsonPreview();
+                    }
+                });
+                $('import-json-preview').addEventListener('click', async (event) => {
+                    const expandBtn = event.target.closest('.import-json-expand-btn');
+                    if (expandBtn) {
+                        const libIndex = Number(expandBtn.getAttribute('data-import-json-lib'));
+                        const questionIndex = Number(expandBtn.getAttribute('data-import-json-question'));
+                        if (!Number.isNaN(libIndex) && !Number.isNaN(questionIndex)) {
+                            const key = `${libIndex}-${questionIndex}`;
+                            state.previewExpanded.importJson[key] = !state.previewExpanded.importJson[key];
+                            renderImportJsonPreview();
+                        }
+                        return;
+                    }
+                    const batchBtn = event.target.closest('.import-json-ai-batch');
+                    if (batchBtn) {
+                        await runBatchAiGenerateImportJson(batchBtn);
+                        return;
+                    }
+                    const aiBtn = event.target.closest('.import-json-ai-btn');
+                    if (aiBtn && state.importJsonPayload) {
+                        const libIndex = Number(aiBtn.getAttribute('data-import-json-lib'));
+                        const questionIndex = Number(aiBtn.getAttribute('data-import-json-question'));
+                        const lib = state.importJsonPayload.libraries[libIndex];
+                        const item = lib?.questions?.[questionIndex];
+                        if (!item) return;
+                        await runAiGenerateForPreviewItem(
+                            { question: item.question, type: item.type, options: item.options },
+                            aiBtn,
+                            (result) => {
+                                if (result.answer) item.answer = result.answer;
+                                if (result.analysis) item.analysis = result.analysis;
+                                if (result.chapter) item.chapter = result.chapter;
+                            }
+                        );
+                        renderImportJsonPreview();
+                        return;
+                    }
+                    const btn = event.target.closest('.import-json-delete-btn');
+                    if (!btn || !state.importJsonPayload) return;
+                    const libIndex = Number(btn.getAttribute('data-import-json-lib'));
+                    const questionIndex = Number(btn.getAttribute('data-import-json-question'));
+                    if (Number.isNaN(libIndex) || Number.isNaN(questionIndex)) return;
+                    const lib = state.importJsonPayload.libraries[libIndex];
+                    if (!lib || !Array.isArray(lib.questions)) return;
+                    lib.questions.splice(questionIndex, 1);
+                    state.previewExpanded.importJson = {};
+                    renderImportJsonPreview();
+                });
+            }
+            if ($('import-doc-preview')) {
+                $('import-doc-preview').addEventListener('input', (event) => {
+                    const target = event.target;
+                    const field = target.getAttribute('data-import-doc-field');
+                    if (!field) return;
+                    const questionIndex = Number(target.closest('[data-import-doc-question]')?.getAttribute('data-import-doc-question'));
+                    if (Number.isNaN(questionIndex)) return;
+                    const question = state.importDocQuestions[questionIndex];
+                    if (!question) return;
+                    if (field === 'options') {
+                        question.options = String(target.value || '')
+                            .split(/\r?\n/)
+                            .map((item) => item.trim())
+                            .filter(Boolean);
+                    } else if (field === 'type') {
+                        question.type = normalizeQuestionType(target.value || 'single');
+                    } else if (field === 'difficulty') {
+                        question.difficulty = toIntegerOrDefault(target.value, 1);
+                    } else {
+                        question[field] = target.value;
+                    }
+                });
+                $('import-doc-preview').addEventListener('change', (event) => {
+                    const target = event.target;
+                    if (target.getAttribute('data-import-doc-field') === 'type') {
+                        renderImportDocPreview();
+                    }
+                });
+                $('import-doc-preview').addEventListener('click', async (event) => {
+                    const expandBtn = event.target.closest('.import-doc-expand-btn');
+                    if (expandBtn) {
+                        const questionIndex = Number(expandBtn.getAttribute('data-import-doc-question'));
+                        if (!Number.isNaN(questionIndex)) {
+                            const key = String(questionIndex);
+                            state.previewExpanded.importDoc[key] = !state.previewExpanded.importDoc[key];
+                            renderImportDocPreview();
+                        }
+                        return;
+                    }
+                    const batchBtn = event.target.closest('.import-doc-ai-batch');
+                    if (batchBtn) {
+                        await runBatchAiGenerateImportDoc(batchBtn);
+                        return;
+                    }
+                    const aiBtn = event.target.closest('.import-doc-ai-btn');
+                    if (aiBtn) {
+                        const questionIndex = Number(aiBtn.getAttribute('data-import-doc-question'));
+                        const item = state.importDocQuestions[questionIndex];
+                        if (!item) return;
+                        await runAiGenerateForPreviewItem(
+                            { question: item.question, type: item.type, options: item.options },
+                            aiBtn,
+                            (result) => {
+                                if (result.answer) item.answer = result.answer;
+                                if (result.analysis) item.analysis = result.analysis;
+                                if (result.chapter) item.chapter = result.chapter;
+                            }
+                        );
+                        renderImportDocPreview();
+                        return;
+                    }
+                    const btn = event.target.closest('.import-doc-delete-btn');
+                    if (!btn) return;
+                    const questionIndex = Number(btn.getAttribute('data-import-doc-question'));
+                    if (Number.isNaN(questionIndex)) return;
+                    state.importDocQuestions.splice(questionIndex, 1);
+                    state.previewExpanded.importDoc = {};
+                    renderImportDocPreview();
+                });
+            }
+            if ($('admin-global-search-input')) {
+                $('admin-global-search-input').addEventListener('input', (event) => {
+                    applyGlobalSearchKeyword(event.target.value);
                 });
             }
             const onSystemThemeChange = () => syncThemeMode();
@@ -2493,15 +4902,26 @@ D. My parents object to my going out alone at night.
             }
             let lastMobileViewport = isMobileViewport();
             window.addEventListener('resize', () => {
+                syncAdminLayoutMetrics();
                 const mobileNow = isMobileViewport();
                 if (mobileNow !== lastMobileViewport) {
                     lastMobileViewport = mobileNow;
                     if (mobileNow) {
                         setLibraryListCollapsed(true, false);
-                        return;
+                        setSidebarMobileOpen(false);
+                    } else {
+                        setSidebarMobileOpen(false);
                     }
                 }
                 renderLibraryPanelState();
+                renderSidebarState();
             });
+            await loadAiSettings();
+            applyAdminPageMode();
             await loadLibraries();
+            applyAdminPageMode();
+            if (isAdminPage('collector-list')) {
+                await loadCollectorRecordList();
+            }
+            maybeOpenStandaloneModal();
         })();

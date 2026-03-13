@@ -6,15 +6,26 @@ import re
 import uuid
 from datetime import datetime, timezone
 from functools import wraps
+import time
+from urllib import request as urlrequest
+from urllib import error as urlerror
 
 try:
     import pymysql
 except ImportError:
     pymysql = None
+try:
+    import redis as redis_lib
+except ImportError:
+    redis_lib = None
 
 app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, 'quiz.db')
+IS_VERCEL = bool(os.environ.get('VERCEL')) or bool(os.environ.get('VERCEL_REGION'))
+DEFAULT_SQLITE_PATH = os.path.join('/tmp', 'quiz.db') if IS_VERCEL else os.path.join(BASE_DIR, 'quiz.db')
+DEFAULT_AI_SETTINGS_PATH = os.path.join('/tmp', 'ai_settings.json') if IS_VERCEL else os.path.join(BASE_DIR, 'ai_settings.json')
+DB_PATH = os.environ.get('DB_PATH', DEFAULT_SQLITE_PATH)
+AI_SETTINGS_PATH = os.environ.get('AI_SETTINGS_PATH', DEFAULT_AI_SETTINGS_PATH)
 DB_BACKEND = (os.environ.get('DB_BACKEND') or '').strip().lower()
 if not DB_BACKEND:
     DB_BACKEND = 'mysql' if os.environ.get('MYSQL_HOST') else 'sqlite'
@@ -33,10 +44,49 @@ except ValueError:
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-this-secret-key')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
+
+def parse_bool_env(value, default=False):
+    if value is None:
+        return bool(default)
+    text = str(value).strip().lower()
+    if text in {'1', 'true', 'yes', 'on', 'y'}:
+        return True
+    if text in {'0', 'false', 'no', 'off', 'n'}:
+        return False
+    return bool(default)
+
+def parse_int_env(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+COLLECTOR_PUSH_DEFAULT_ENABLED = parse_bool_env(os.environ.get('COLLECTOR_PUSH'), True)
+COLLECTOR_PUSH_DEFAULT_TOKEN = (os.environ.get('COLLECTOR_PUSH_TOKEN') or '').strip()
+REDIS_ENABLED = parse_bool_env(os.environ.get('REDIS_ENABLED'), True)
+REDIS_URL = (os.environ.get('REDIS_URL') or '').strip()
+REDIS_HOST = (os.environ.get('REDIS_HOST') or '127.0.0.1').strip() or '127.0.0.1'
+REDIS_PORT = parse_int_env(os.environ.get('REDIS_PORT'), 6379)
+REDIS_DB = parse_int_env(os.environ.get('REDIS_DB'), 0)
+REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD')
+REDIS_CACHE_PREFIX = (os.environ.get('REDIS_CACHE_PREFIX') or 'quiz').strip() or 'quiz'
+REDIS_PUBLIC_LIB_CACHE_TTL = max(10, parse_int_env(os.environ.get('REDIS_PUBLIC_LIB_CACHE_TTL'), 120))
+
+REDIS_CLIENT = None
+REDIS_INIT_ATTEMPTED = False
 SCHEMA_INITIALIZED = False
 DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
 if pymysql is not None:
     DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, pymysql.err.IntegrityError)
+
+AI_DEFAULT_SETTINGS = {
+    'provider': 'openai_compatible',
+    'base_url': 'https://api.openai.com/v1',
+    'model': 'gpt-4o-mini',
+    'endpoint_path': '',
+    'collector_push_enabled': COLLECTOR_PUSH_DEFAULT_ENABLED,
+    'collector_push_token': COLLECTOR_PUSH_DEFAULT_TOKEN
+}
 
 class MySQLCursorAdapter:
     def __init__(self, cursor):
@@ -102,13 +152,113 @@ def get_db_connection():
             autocommit=False
         ))
     else:
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
+        # SQLite 性能与一致性设置
+        try:
+            conn.execute('PRAGMA foreign_keys=ON')
+            conn.execute('PRAGMA journal_mode=WAL')
+        except sqlite3.OperationalError:
+            pass
 
     if not SCHEMA_INITIALIZED:
         ensure_schema(conn)
         SCHEMA_INITIALIZED = True
     return conn
+
+def build_redis_cache_key(*parts):
+    normalized = [REDIS_CACHE_PREFIX]
+    for part in parts:
+        text = str(part or '').strip()
+        if text:
+            normalized.append(text)
+    return ':'.join(normalized)
+
+def get_redis_client():
+    global REDIS_CLIENT, REDIS_INIT_ATTEMPTED
+    if REDIS_INIT_ATTEMPTED:
+        return REDIS_CLIENT
+    REDIS_INIT_ATTEMPTED = True
+
+    if not REDIS_ENABLED or redis_lib is None:
+        REDIS_CLIENT = None
+        return None
+
+    try:
+        if REDIS_URL:
+            client = redis_lib.Redis.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=1,
+                socket_timeout=1
+            )
+        else:
+            client = redis_lib.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                db=REDIS_DB,
+                password=REDIS_PASSWORD,
+                decode_responses=True,
+                socket_connect_timeout=1,
+                socket_timeout=1
+            )
+        client.ping()
+        REDIS_CLIENT = client
+    except Exception:
+        REDIS_CLIENT = None
+    return REDIS_CLIENT
+
+def redis_get_json(key):
+    client = get_redis_client()
+    if not client:
+        return None
+    try:
+        raw = client.get(key)
+        if not raw:
+            return None
+        return json.loads(raw)
+    except Exception:
+        return None
+
+def redis_set_json(key, payload, ttl_seconds=REDIS_PUBLIC_LIB_CACHE_TTL):
+    client = get_redis_client()
+    if not client:
+        return
+    try:
+        ttl = max(1, int(ttl_seconds))
+        client.setex(key, ttl, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        pass
+
+def invalidate_public_library_cache(library_id=None):
+    client = get_redis_client()
+    if not client:
+        return
+
+    list_key = build_redis_cache_key('public', 'libraries', 'list')
+    try:
+        client.delete(list_key)
+    except Exception:
+        pass
+
+    if library_id:
+        detail_key = build_redis_cache_key('public', 'libraries', 'detail', library_id)
+        try:
+            client.delete(detail_key)
+        except Exception:
+            pass
+        return
+
+    pattern = build_redis_cache_key('public', 'libraries', 'detail', '*')
+    try:
+        keys = list(client.scan_iter(match=pattern, count=200))
+        if keys:
+            client.delete(*keys)
+    except Exception:
+        pass
 
 def ensure_mysql_schema(conn):
     cursor = conn.cursor()
@@ -117,7 +267,8 @@ def ensure_mysql_schema(conn):
             id VARCHAR(64) PRIMARY KEY,
             title VARCHAR(255) NOT NULL,
             icon VARCHAR(32) NOT NULL,
-            description TEXT NOT NULL
+            description TEXT NOT NULL,
+            is_public TINYINT(1) NOT NULL DEFAULT 1
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ''')
     cursor.execute('''
@@ -150,6 +301,20 @@ def ensure_mysql_schema(conn):
             CONSTRAINT fk_user_answers_question FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS collector_records (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            source_filename VARCHAR(255) NOT NULL DEFAULT '',
+            source_size INT NOT NULL DEFAULT 0,
+            library_title VARCHAR(255) NOT NULL DEFAULT '',
+            library_id VARCHAR(64) NOT NULL DEFAULT '',
+            library_count INT NOT NULL DEFAULT 0,
+            question_count INT NOT NULL DEFAULT 0,
+            payload LONGTEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_collector_records_created_at (created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ''')
 
     def get_columns(table_name):
         cursor.execute('''
@@ -162,6 +327,8 @@ def ensure_mysql_schema(conn):
     library_columns = get_columns('libraries')
     if 'description' not in library_columns:
         cursor.execute("ALTER TABLE libraries ADD COLUMN description VARCHAR(1024) NOT NULL DEFAULT ''")
+    if 'is_public' not in library_columns:
+        cursor.execute("ALTER TABLE libraries ADD COLUMN is_public TINYINT(1) NOT NULL DEFAULT 1")
 
     question_columns = get_columns('questions')
     if 'chapter' not in question_columns:
@@ -197,6 +364,9 @@ def ensure_schema(conn):
     columns = {row[1] for row in cursor.fetchall()}
     if 'description' not in columns:
         cursor.execute("ALTER TABLE libraries ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    if 'is_public' not in columns:
+        cursor.execute("ALTER TABLE libraries ADD COLUMN is_public INTEGER NOT NULL DEFAULT 1")
         conn.commit()
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='questions'")
@@ -286,6 +456,258 @@ def ensure_schema(conn):
         cursor.execute("ALTER TABLE questions ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
         cursor.execute("UPDATE questions SET updated_at = CURRENT_TIMESTAMP WHERE updated_at = ''")
         conn.commit()
+
+    # 索引优化（SQLite）
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_questions_library_id ON questions(library_id)")
+
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_answers'")
+    if cursor.fetchone():
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_answers_library_id ON user_answers(library_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_answers_question_id ON user_answers(question_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_answers_created_at ON user_answers(created_at)")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS collector_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_filename TEXT NOT NULL DEFAULT '',
+            source_size INTEGER NOT NULL DEFAULT 0,
+            library_title TEXT NOT NULL DEFAULT '',
+            library_id TEXT NOT NULL DEFAULT '',
+            library_count INTEGER NOT NULL DEFAULT 0,
+            question_count INTEGER NOT NULL DEFAULT 0,
+            payload TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_collector_records_created_at ON collector_records(created_at)")
+    conn.commit()
+
+def load_ai_settings():
+    if not os.path.exists(AI_SETTINGS_PATH):
+        return {}
+    try:
+        with open(AI_SETTINGS_PATH, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {}
+
+def save_ai_settings(settings):
+    try:
+        settings_dir = os.path.dirname(AI_SETTINGS_PATH)
+        if settings_dir:
+            os.makedirs(settings_dir, exist_ok=True)
+        with open(AI_SETTINGS_PATH, 'w', encoding='utf-8') as handle:
+            json.dump(settings, handle, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        raise RuntimeError(f'保存 AI 设置失败: {exc}')
+
+def sanitize_ai_settings(payload, existing=None):
+    existing = existing or {}
+    provider = str(payload.get('provider') or existing.get('provider') or AI_DEFAULT_SETTINGS['provider']).strip()
+    base_url = str(payload.get('base_url') or existing.get('base_url') or AI_DEFAULT_SETTINGS['base_url']).strip()
+    model = str(payload.get('model') or existing.get('model') or AI_DEFAULT_SETTINGS['model']).strip()
+    endpoint_path = str(payload.get('endpoint_path') or existing.get('endpoint_path') or AI_DEFAULT_SETTINGS['endpoint_path']).strip()
+    api_key = payload.get('api_key', None)
+    clear_api_key = bool(payload.get('clear_api_key'))
+    if 'collector_push_enabled' in payload:
+        collector_push_enabled = parse_bool_env(payload.get('collector_push_enabled'), AI_DEFAULT_SETTINGS['collector_push_enabled'])
+    elif 'collector_push_enabled' in existing:
+        collector_push_enabled = parse_bool_env(existing.get('collector_push_enabled'), AI_DEFAULT_SETTINGS['collector_push_enabled'])
+    else:
+        collector_push_enabled = AI_DEFAULT_SETTINGS['collector_push_enabled']
+
+    if 'collector_push_token' in payload:
+        collector_push_token = str(payload.get('collector_push_token') or '').strip()
+    elif 'collector_push_token' in existing:
+        collector_push_token = str(existing.get('collector_push_token') or '').strip()
+    else:
+        collector_push_token = AI_DEFAULT_SETTINGS['collector_push_token']
+
+    cleaned = {
+        'provider': provider or AI_DEFAULT_SETTINGS['provider'],
+        'base_url': base_url or AI_DEFAULT_SETTINGS['base_url'],
+        'model': model or AI_DEFAULT_SETTINGS['model'],
+        'endpoint_path': endpoint_path,
+        'collector_push_enabled': bool(collector_push_enabled),
+        'collector_push_token': collector_push_token
+    }
+
+    if clear_api_key:
+        cleaned['api_key'] = ''
+    elif api_key is not None and str(api_key).strip():
+        cleaned['api_key'] = str(api_key).strip()
+    elif existing.get('api_key'):
+        cleaned['api_key'] = existing.get('api_key')
+    else:
+        cleaned['api_key'] = ''
+
+    return cleaned
+
+def mask_api_key(api_key):
+    if not api_key:
+        return ''
+    if len(api_key) <= 6:
+        return '*' * len(api_key)
+    return f"{'*' * (len(api_key) - 4)}{api_key[-4:]}"
+
+def extract_json_payload(text):
+    if text is None:
+        raise ValueError('AI 返回为空')
+    cleaned = str(text).strip()
+    if cleaned.startswith('```'):
+        cleaned = re.sub(r'^```(?:json)?', '', cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'```$', '', cleaned).strip()
+    start = min([idx for idx in (cleaned.find('{'), cleaned.find('[')) if idx != -1], default=-1)
+    if start > 0:
+        cleaned = cleaned[start:]
+    # 尝试直接解析
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 尝试截取首个完整 JSON 块
+    stack = []
+    end_index = None
+    for i, ch in enumerate(cleaned):
+        if ch in '{[':
+            stack.append(ch)
+        elif ch in '}]' and stack:
+            stack.pop()
+            if not stack:
+                end_index = i + 1
+                break
+    if end_index is not None:
+        snippet = cleaned[:end_index]
+        return json.loads(snippet)
+    raise ValueError('AI 返回不是有效 JSON')
+
+def call_openai_compatible_chat(settings, prompt):
+    base_url = (settings.get('base_url') or '').strip().rstrip('/')
+    endpoint_path = (settings.get('endpoint_path') or '').strip()
+    if not base_url and not endpoint_path:
+        raise RuntimeError('AI Base URL 不能为空')
+
+    if endpoint_path.startswith('http://') or endpoint_path.startswith('https://'):
+        url = endpoint_path
+    elif base_url.endswith('/chat/completions'):
+        url = base_url
+    elif endpoint_path:
+        url = f'{base_url}/{endpoint_path.lstrip("/")}'
+    elif base_url.endswith('/v1'):
+        url = f'{base_url}/chat/completions'
+    else:
+        url = f'{base_url}/v1/chat/completions'
+    payload = {
+        'model': settings['model'],
+        'temperature': 0.2,
+        'stream': False,
+        'messages': [
+            {'role': 'system', 'content': 'You are a quiz data extraction engine. Return only strict JSON.'},
+            {'role': 'user', 'content': prompt}
+        ]
+    }
+    data = json.dumps(payload).encode('utf-8')
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) CodexClient/1.0',
+        'Authorization': f"Bearer {settings['api_key']}"
+    }
+    req = urlrequest.Request(url, data=data, headers=headers, method='POST')
+    try:
+        with urlrequest.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode('utf-8')
+    except urlerror.HTTPError as exc:
+        try:
+            error_payload = exc.read().decode('utf-8')
+        except Exception:
+            error_payload = ''
+        raise RuntimeError(f'AI 请求失败: {exc.code} {exc.reason} {error_payload}')
+    except urlerror.URLError as exc:
+        raise RuntimeError(f'AI 请求失败: {exc.reason}')
+
+    if not raw or not raw.strip():
+        raise RuntimeError('AI 返回为空，请检查 API Key、模型或网关拦截')
+
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and parsed.get('error'):
+            raise RuntimeError(f"AI 返回错误: {parsed.get('error')}")
+        return parsed['choices'][0]['message']['content']
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        snippet = raw.strip().replace('\n', ' ')[:200]
+        raise RuntimeError(f'AI 返回解析失败: {exc}. 响应片段: {snippet}')
+
+def build_ai_collect_prompt(source_text, library_title=None, library_id=None):
+    title = library_title or 'AI 采集题库'
+    lib_id = library_id or ''
+    return (
+        '请将以下内容转换为题库 JSON。输出必须是严格 JSON，不要包含任何解释、Markdown 或代码块。\n'
+        'JSON 结构如下：\n'
+        '{ "libraries": [ { "id": "", "title": "", "icon": "📚", "description": "", "questions": [\n'
+        '  { "question": "", "type": "single|multiple|judge|fill|qa", "options": [], "answer": "", "analysis": "", "difficulty": 1, "chapter": "" }\n'
+        '] } ] }\n'
+        '规则：\n'
+        '1) 单选/多选题 options 至少 2 个，answer 用选项字母（如 A 或 A,C 或 ["A","C"]）。\n'
+        '2) 判断题 answer 用“正确/错误”。\n'
+        '3) 填空题 answer 使用“答案1|答案2”。\n'
+        '4) 问答题 answer 可以为空字符串，但尽量给出。\n'
+        f'5) 题集 title 固定为：{title}\n'
+        f'6) 题集 id 若提供则写入：{lib_id}\n'
+        '7) 无法识别的题型默认 single。\n'
+        '\n'
+        '题目内容如下：\n'
+        f'{source_text}\n'
+    )
+
+def build_ai_generate_prompt(question_text, question_type, options):
+    type_text = normalize_question_type(question_type)
+    option_lines = []
+    if isinstance(options, list) and options:
+        for idx, opt in enumerate(options):
+            letter = chr(65 + idx)
+            option_lines.append(f'{letter}. {opt}')
+    options_block = '\n'.join(option_lines)
+
+    return (
+        '请根据题目与选项生成答案、解析与章节。输出必须是严格 JSON，不要包含任何解释、Markdown 或代码块。\n'
+        'JSON 结构：{"answer": "", "analysis": "", "chapter": ""}\n'
+        '规则：\n'
+        '1) 单选题 answer 使用选项字母，如 A。\n'
+        '2) 多选题 answer 使用逗号分隔字母，如 A,C。\n'
+        '3) 判断题 answer 使用“正确”或“错误”。\n'
+        '4) 填空题 answer 使用“答案1|答案2”。\n'
+        '5) 问答题 answer 可为简短文本。\n'
+        '题目：\n'
+        f'{question_text}\n'
+        f'题型：{type_text}\n'
+        f'选项：\n{options_block}\n'
+    )
+
+def build_ai_generate_batch_prompt(items):
+    lines = [
+        '请根据以下题目生成答案、解析与章节。输出必须是严格 JSON，不要包含任何解释、Markdown 或代码块。',
+        '返回格式：{"items":[{"answer":"","analysis":"","chapter":""}, ...]}',
+        '要求：items 长度必须与输入题目数量一致，顺序保持一致。'
+    ]
+    for idx, item in enumerate(items, start=1):
+        q_text = item.get('question', '')
+        q_type = normalize_question_type(item.get('type'))
+        opts = item.get('options') or []
+        option_lines = []
+        if isinstance(opts, list) and opts:
+            for opt_index, opt in enumerate(opts):
+                letter = chr(65 + opt_index)
+                option_lines.append(f'{letter}. {opt}')
+        options_block = '\n'.join(option_lines)
+        lines.append(f'{idx}. 题目: {q_text}')
+        lines.append(f'题型: {q_type}')
+        if options_block:
+            lines.append(f'选项:\n{options_block}')
+    return '\n'.join(lines)
 
 QUESTION_TYPE_ALIASES = {
     'single': 'single',
@@ -556,10 +978,11 @@ def get_library_with_questions(conn, lib_id):
         'title': library['title'],
         'icon': library['icon'],
         'description': library['description'] if 'description' in library.keys() else '',
+        'is_public': bool(library['is_public']) if 'is_public' in library.keys() else True,
         'questions': questions
     }
 
-def parse_question_payload(data):
+def parse_question_payload(data, allow_empty_answer=False):
     question_text = (data.get('question') or data.get('q') or '').strip()
     analysis = (data.get('analysis') or '').strip()
     chapter = (data.get('chapter') or data.get('knowledge_point') or '').strip()
@@ -582,9 +1005,12 @@ def parse_question_payload(data):
         options = parse_options(data.get('options'))
         if question_type == 'multiple' and len(options) > 8:
             raise ValueError('多选题最多支持 8 个选项')
-    if raw_answer is None or str(raw_answer).strip() == '':
-        raise ValueError('答案不能为空')
-    if question_type == 'multiple':
+    answer_is_empty = raw_answer is None or str(raw_answer).strip() == ''
+    if answer_is_empty:
+        if not allow_empty_answer:
+            raise ValueError('答案不能为空')
+        answer = ''
+    elif question_type == 'multiple':
         indices = parse_multiple_answer(raw_answer, len(options))
         if len(indices) < 2:
             raise ValueError('多选题答案至少需要 2 个选项')
@@ -666,6 +1092,388 @@ def extract_import_libraries(payload):
 
     return libraries
 
+def save_collector_record(source_filename, source_size, library_title, library_id, library_count, question_count, payload):
+    payload_text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO collector_records (
+                source_filename, source_size, library_title, library_id,
+                library_count, question_count, payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            str(source_filename or ''),
+            int(source_size or 0),
+            str(library_title or ''),
+            str(library_id or ''),
+            int(library_count or 0),
+            int(question_count or 0),
+            payload_text
+        ))
+        record_id = cursor.lastrowid
+        conn.commit()
+        return int(record_id) if record_id is not None else None
+    except Exception:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+def count_questions_in_libraries(libraries):
+    if not isinstance(libraries, list):
+        return 0
+    total = 0
+    for lib in libraries:
+        if isinstance(lib, dict) and isinstance(lib.get('questions'), list):
+            total += len(lib.get('questions') or [])
+    return total
+
+def parse_options_for_lookup(raw_options):
+    try:
+        return parse_options(raw_options, allow_empty=True)
+    except Exception:
+        return []
+
+def format_stored_answer_for_client(question_type, stored_answer):
+    q_type = normalize_question_type(question_type)
+    if stored_answer is None:
+        return ''
+    if q_type == 'multiple':
+        indices = parse_stored_multiple_answer(stored_answer)
+        letters = []
+        for idx in indices:
+            try:
+                idx_num = int(idx)
+            except (TypeError, ValueError):
+                continue
+            if idx_num < 0:
+                continue
+            letters.append(chr(ord('A') + idx_num))
+        return '#'.join(letters) if letters else str(stored_answer).strip()
+    if q_type == 'single':
+        value = str(stored_answer).strip()
+        if re.fullmatch(r'-?\d+', value):
+            idx = int(value)
+            if idx >= 0:
+                return chr(ord('A') + idx)
+        return value.upper() if re.fullmatch(r'[A-Za-z]', value) else value
+    if q_type == 'judge':
+        normalized = normalize_judge_answer(stored_answer)
+        if normalized == '0':
+            return '正确'
+        if normalized == '1':
+            return '错误'
+        return str(stored_answer).strip()
+    return str(stored_answer).strip()
+
+def find_answer_from_question_bank(question_text, question_type=None):
+    text = str(question_text or '').strip()
+    if not text:
+        return ''
+    q_type = normalize_question_type(question_type or 'single')
+    normalized_target = normalize_compare_text(text)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # 1) 优先精确匹配（同题型）
+        cursor.execute('''
+            SELECT question, type, answer
+            FROM questions
+            WHERE question = ? AND type = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+        ''', (text, q_type))
+        row = cursor.fetchone()
+        if row:
+            return format_stored_answer_for_client(row['type'], row['answer'])
+
+        # 2) 精确匹配（不限题型）
+        cursor.execute('''
+            SELECT question, type, answer
+            FROM questions
+            WHERE question = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+        ''', (text,))
+        row = cursor.fetchone()
+        if row:
+            return format_stored_answer_for_client(row['type'], row['answer'])
+
+        # 3) 近似匹配（同题型）
+        like_keyword = f"%{text[:120]}%"
+        cursor.execute('''
+            SELECT question, type, answer
+            FROM questions
+            WHERE type = ? AND question LIKE ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 80
+        ''', (q_type, like_keyword))
+        rows = cursor.fetchall()
+        for item in rows:
+            normalized_item = normalize_compare_text(item['question'])
+            if not normalized_item:
+                continue
+            if normalized_item == normalized_target or normalized_target in normalized_item or normalized_item in normalized_target:
+                return format_stored_answer_for_client(item['type'], item['answer'])
+    finally:
+        conn.close()
+    return ''
+
+def _extract_questions_from_any_payload(payload_obj):
+    extracted = []
+
+    def _append(item, fallback_type='single'):
+        if not isinstance(item, dict):
+            return
+        question = str(item.get('question') or item.get('q') or item.get('title') or '').strip()
+        answer = str(item.get('answer') if item.get('answer') is not None else item.get('ans') or '').strip()
+        q_type = normalize_question_type(item.get('type') or fallback_type or 'single')
+        if not question:
+            return
+        extracted.append({
+            'question': question,
+            'type': q_type,
+            'answer': answer
+        })
+
+    libraries = []
+    if isinstance(payload_obj, dict) and isinstance(payload_obj.get('libraries'), list):
+        libraries = payload_obj.get('libraries') or []
+    elif isinstance(payload_obj, list):
+        libraries = payload_obj
+
+    if libraries:
+        for lib in libraries:
+            if not isinstance(lib, dict):
+                continue
+            for question_item in (lib.get('questions') or []):
+                _append(question_item)
+        return extracted
+
+    if isinstance(payload_obj, dict):
+        _append(payload_obj, payload_obj.get('type') if isinstance(payload_obj, dict) else 'single')
+    return extracted
+
+def find_answer_from_collector_records(question_text, question_type=None, limit=120):
+    text = str(question_text or '').strip()
+    if not text:
+        return ''
+    q_type = normalize_question_type(question_type or 'single')
+    normalized_target = normalize_compare_text(text)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT payload
+            FROM collector_records
+            ORDER BY id DESC
+            LIMIT ?
+        ''', (max(1, min(int(limit), 500)),))
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    for row in rows:
+        payload_raw = row['payload'] if isinstance(row, dict) or hasattr(row, '__getitem__') else ''
+        try:
+            payload_obj = json.loads(str(payload_raw or '').strip() or '{}')
+        except Exception:
+            payload_obj = None
+        if payload_obj is None:
+            continue
+
+        candidates = _extract_questions_from_any_payload(payload_obj)
+        for item in candidates:
+            stored_question = str(item.get('question') or '').strip()
+            stored_answer = str(item.get('answer') or '').strip()
+            stored_type = normalize_question_type(item.get('type') or 'single')
+            if not stored_question or not stored_answer:
+                continue
+            # 题型一致优先，不一致也允许兜底命中
+            if stored_type != q_type and q_type:
+                # 延迟匹配，先看是否文本几乎完全一致
+                pass
+            normalized_item = normalize_compare_text(stored_question)
+            if not normalized_item:
+                continue
+            if normalized_item == normalized_target or normalized_target in normalized_item or normalized_item in normalized_target:
+                return format_stored_answer_for_client(stored_type, stored_answer)
+    return ''
+
+def generate_answer_by_ai(question_text, question_type, options):
+    question = str(question_text or '').strip()
+    if not question:
+        return ''
+    q_type = normalize_question_type(question_type or 'single')
+    normalized_options = parse_options_for_lookup(options)
+
+    settings = sanitize_ai_settings({}, load_ai_settings())
+    if not settings.get('api_key'):
+        return ''
+    if not settings.get('base_url') and not settings.get('endpoint_path'):
+        return ''
+    if settings.get('provider') != 'openai_compatible':
+        return ''
+
+    prompt = build_ai_generate_prompt(question, q_type, normalized_options)
+    ai_text = call_openai_compatible_chat(settings, prompt)
+    result = extract_json_payload(ai_text)
+    if not isinstance(result, dict):
+        return ''
+    return str(result.get('answer') or '').strip()
+
+def upsert_collector_libraries_into_question_bank(
+    libraries,
+    fallback_library_id='collector-history',
+    fallback_library_title='采集历史题库'
+):
+    if not isinstance(libraries, list):
+        return {'merged_count': 0, 'updated_count': 0, 'library_ids': []}
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    reserved_ids = set()
+    merged_count = 0
+    updated_count = 0
+    affected_library_ids = []
+
+    def _fetch_row_id(row):
+        if row is None:
+            return None
+        if hasattr(row, 'keys') and 'id' in row.keys():
+            return row['id']
+        try:
+            return row[0]
+        except Exception:
+            return None
+
+    try:
+        prepared_libraries = []
+        for lib_index, lib in enumerate(libraries, start=1):
+            if not isinstance(lib, dict):
+                continue
+            title = str(lib.get('title') or fallback_library_title or f'采集题库{lib_index}').strip()
+            if not title:
+                title = f'采集题库{lib_index}'
+            icon = str(lib.get('icon') or '📥').strip() or '📥'
+            description = str(lib.get('description') or '').strip()
+            is_public = 1 if parse_bool_env(lib.get('is_public'), True) else 0
+            requested_id = normalize_library_id(lib.get('id'))
+
+            if not requested_id:
+                base_id = normalize_library_id(title) or normalize_library_id(fallback_library_id) or 'collector-history'
+                if base_id in reserved_ids:
+                    requested_id = ensure_unique_library_id(conn, base_id, reserved_ids)
+                else:
+                    cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (base_id,))
+                    if cursor.fetchone():
+                        requested_id = base_id
+                    else:
+                        requested_id = base_id
+
+            if requested_id in reserved_ids:
+                requested_id = ensure_unique_library_id(conn, requested_id, reserved_ids)
+
+            cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (requested_id,))
+            exists = cursor.fetchone() is not None
+            if exists:
+                cursor.execute(
+                    'UPDATE libraries SET title = ?, icon = ?, description = ?, is_public = ? WHERE id = ?',
+                    (title, icon, description, is_public, requested_id)
+                )
+            else:
+                cursor.execute(
+                    'INSERT INTO libraries (id, title, icon, description, is_public) VALUES (?, ?, ?, ?, ?)',
+                    (requested_id, title, icon, description, is_public)
+                )
+
+            reserved_ids.add(requested_id)
+            if requested_id not in affected_library_ids:
+                affected_library_ids.append(requested_id)
+            questions = lib.get('questions')
+            if not isinstance(questions, list):
+                questions = []
+            prepared_libraries.append((requested_id, questions))
+
+        for library_id, questions in prepared_libraries:
+            for raw_question in questions:
+                if not isinstance(raw_question, dict):
+                    continue
+                try:
+                    parsed = parse_question_payload(raw_question, allow_empty_answer=True)
+                except Exception:
+                    fallback_question = str(raw_question.get('question') or raw_question.get('q') or '').strip()
+                    if not fallback_question:
+                        continue
+                    try:
+                        parsed = parse_question_payload({
+                            'question': fallback_question,
+                            'type': 'qa',
+                            'options': [],
+                            'answer': str(raw_question.get('answer') if raw_question.get('answer') is not None else raw_question.get('ans') or '').strip(),
+                            'analysis': str(raw_question.get('analysis') or '').strip(),
+                            'difficulty': raw_question.get('difficulty', 1),
+                            'chapter': str(raw_question.get('chapter') or raw_question.get('knowledge_point') or '').strip()
+                        }, allow_empty_answer=True)
+                    except Exception:
+                        continue
+
+                cursor.execute('''
+                    SELECT id FROM questions
+                    WHERE library_id = ? AND question = ? AND type = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                ''', (library_id, parsed['question'], parsed['type']))
+                existing_row = cursor.fetchone()
+                existing_id = _fetch_row_id(existing_row)
+
+                if existing_id:
+                    cursor.execute('''
+                        UPDATE questions
+                        SET options = ?, answer = ?, analysis = ?, difficulty = ?, chapter = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (
+                        parsed['options'],
+                        parsed['answer'],
+                        parsed['analysis'],
+                        parsed['difficulty'],
+                        parsed['chapter'],
+                        existing_id
+                    ))
+                    updated_count += 1
+                else:
+                    cursor.execute('''
+                        INSERT INTO questions (
+                            question, type, options, answer, analysis,
+                            difficulty, chapter, library_id, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ''', (
+                        parsed['question'],
+                        parsed['type'],
+                        parsed['options'],
+                        parsed['answer'],
+                        parsed['analysis'],
+                        parsed['difficulty'],
+                        parsed['chapter'],
+                        library_id
+                    ))
+                    merged_count += 1
+
+        conn.commit()
+        invalidate_public_library_cache()
+        return {
+            'merged_count': merged_count,
+            'updated_count': updated_count,
+            'library_ids': affected_library_ids
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 def is_admin_authenticated():
     return bool(session.get('is_admin'))
 
@@ -681,11 +1489,50 @@ def require_admin_auth(view_func):
 def serve_index():
     return render_template('index.html')
 
-@app.route('/admin')
-def serve_admin():
+def render_admin_page(admin_page):
     if not is_admin_authenticated():
         return redirect('/admin/login')
-    return render_template('admin.html')
+    page_titles = {
+        'question-bank': '题库管理',
+        'library-management': '题集管理',
+        'import': '导入题库',
+        'export': '导出题库',
+        'collector-list': '采集列表'
+    }
+    page_key = admin_page if admin_page in page_titles else 'question-bank'
+    return render_template(
+        'admin.html',
+        admin_page=page_key,
+        admin_page_title=page_titles[page_key]
+    )
+
+@app.route('/admin')
+def serve_admin():
+    return redirect('/admin/question-bank')
+
+@app.route('/admin/question-bank')
+def serve_admin_question_bank():
+    return render_admin_page('question-bank')
+
+@app.route('/admin/library-management')
+def serve_admin_library_management():
+    return render_admin_page('library-management')
+
+@app.route('/admin/import')
+def serve_admin_import():
+    return render_admin_page('import')
+
+@app.route('/admin/export')
+def serve_admin_export():
+    return render_admin_page('export')
+
+@app.route('/admin/question-collector')
+def serve_admin_question_collector():
+    return redirect('/admin/import')
+
+@app.route('/admin/collector-list')
+def serve_admin_collector_list():
+    return render_admin_page('collector-list')
 
 @app.route('/admin/login')
 def serve_admin_login():
@@ -697,20 +1544,19 @@ def serve_admin_login():
 @app.route('/api/libraries', methods=['GET'])
 @app.route('/libraries', methods=['GET'])
 def get_libraries():
+    cache_key = build_redis_cache_key('public', 'libraries', 'list')
+    cached = redis_get_json(cache_key)
+    if isinstance(cached, list):
+        return jsonify(cached)
+
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT
-            l.id,
-            l.title,
-            l.icon,
-            l.description,
-            (
-                SELECT COUNT(1)
-                FROM questions q
-                WHERE q.library_id = l.id
-            ) AS question_count
+        SELECT l.id, l.title, l.icon, l.description, l.is_public, COUNT(q.id) AS question_count
         FROM libraries l
+        LEFT JOIN questions q ON q.library_id = l.id
+        WHERE l.is_public = 1
+        GROUP BY l.id, l.title, l.icon, l.description, l.is_public
         ORDER BY l.id
     ''')
     libraries = cursor.fetchall()
@@ -723,21 +1569,34 @@ def get_libraries():
             'title': lib['title'],
             'icon': lib['icon'],
             'description': lib['description'] if 'description' in lib.keys() else '',
+            'is_public': bool(lib['is_public']) if 'is_public' in lib.keys() else True,
             'question_count': int(lib['question_count']) if 'question_count' in lib.keys() else 0
         })
-    
+
+    redis_set_json(cache_key, result, REDIS_PUBLIC_LIB_CACHE_TTL)
     return jsonify(result)
 
 # 获取题库详情（包含题目和选项）
 @app.route('/api/libraries/<lib_id>', methods=['GET'])
 @app.route('/libraries/<lib_id>', methods=['GET'])
 def get_library_details(lib_id):
+    admin_auth = is_admin_authenticated()
+    cache_key = build_redis_cache_key('public', 'libraries', 'detail', lib_id)
+    if not admin_auth:
+        cached = redis_get_json(cache_key)
+        if isinstance(cached, dict):
+            return jsonify(cached)
+
     conn = get_db_connection()
     result = get_library_with_questions(conn, lib_id)
     conn.close()
 
     if not result:
         return jsonify({'error': 'Library not found'}), 404
+    if not result.get('is_public', True) and not admin_auth:
+        return jsonify({'error': 'Library not found'}), 404
+    if not admin_auth and result.get('is_public', True):
+        redis_set_json(cache_key, result, REDIS_PUBLIC_LIB_CACHE_TTL)
     return jsonify(result)
 
 # 保存用户答题记录
@@ -761,6 +1620,7 @@ def save_answers():
         
         correct_count = 0
         total_questions = len(questions)
+        batch_rows = []
         
         for i, q in enumerate(questions):
             user_answer = answers.get(str(i))
@@ -774,13 +1634,16 @@ def save_answers():
                 correct_count += 1
             
             # 保存答题记录
-            cursor.execute('''
-                INSERT INTO user_answers (library_id, question_id, user_answer, is_correct)
-                VALUES (?, ?, ?, ?)
-            ''', (library_id, q['id'], serialize_user_answer(user_answer), is_correct))
+            batch_rows.append((library_id, q['id'], serialize_user_answer(user_answer), is_correct))
         
         accuracy = round(correct_count / total_questions * 100) if total_questions > 0 else 0
         score = correct_count
+
+        if batch_rows:
+            cursor.executemany('''
+                INSERT INTO user_answers (library_id, question_id, user_answer, is_correct)
+                VALUES (?, ?, ?, ?)
+            ''', batch_rows)
         
         conn.commit()
         conn.close()
@@ -835,10 +1698,10 @@ def admin_get_libraries():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT l.id, l.title, l.icon, l.description, COUNT(q.id) AS question_count
+        SELECT l.id, l.title, l.icon, l.description, l.is_public, COUNT(q.id) AS question_count
         FROM libraries l
         LEFT JOIN questions q ON q.library_id = l.id
-        GROUP BY l.id, l.title, l.icon, l.description
+        GROUP BY l.id, l.title, l.icon, l.description, l.is_public
         ORDER BY l.id
     ''')
     rows = cursor.fetchall()
@@ -849,6 +1712,7 @@ def admin_get_libraries():
         'title': row['title'],
         'icon': row['icon'],
         'description': row['description'] if 'description' in row.keys() else '',
+        'is_public': bool(row['is_public']) if 'is_public' in row.keys() else True,
         'question_count': row['question_count']
     } for row in rows])
 
@@ -860,6 +1724,7 @@ def admin_create_library():
     title = (data.get('title') or '').strip()
     icon = (data.get('icon') or '📚').strip() or '📚'
     description = (data.get('description') or '').strip()
+    is_public = 1 if parse_bool_env(data.get('is_public'), True) else 0
     lib_id = normalize_library_id(data.get('id'))
 
     if not title:
@@ -872,10 +1737,11 @@ def admin_create_library():
     cursor = conn.cursor()
     try:
         cursor.execute(
-            'INSERT INTO libraries (id, title, icon, description) VALUES (?, ?, ?, ?)',
-            (lib_id, title, icon, description)
+            'INSERT INTO libraries (id, title, icon, description, is_public) VALUES (?, ?, ?, ?, ?)',
+            (lib_id, title, icon, description, is_public)
         )
         conn.commit()
+        invalidate_public_library_cache()
     except DB_INTEGRITY_ERRORS:
         conn.rollback()
         conn.close()
@@ -890,6 +1756,7 @@ def admin_create_library():
         'title': created['title'],
         'icon': created['icon'],
         'description': created['description'] if 'description' in created.keys() else '',
+        'is_public': bool(created['is_public']) if 'is_public' in created.keys() else True,
         'question_count': 0
     }), 201
 
@@ -904,6 +1771,53 @@ def admin_get_library_details(lib_id):
     if not result:
         return jsonify({'error': 'Library not found'}), 404
     return jsonify(result)
+
+# 管理后台：获取全题库题目（跨题集）
+@app.route('/api/admin/questions', methods=['GET'])
+@require_admin_auth
+def admin_get_all_questions():
+    keyword = (request.args.get('keyword') or '').strip()
+    library_id = (request.args.get('library_id') or '').strip()
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = '''
+        SELECT q.*, l.title AS library_title, l.icon AS library_icon
+        FROM questions q
+        JOIN libraries l ON l.id = q.library_id
+    '''
+    where_clauses = []
+    params = []
+
+    if library_id:
+        where_clauses.append('q.library_id = ?')
+        params.append(library_id)
+
+    if keyword:
+        like_kw = f'%{keyword}%'
+        where_clauses.append('(q.question LIKE ? OR q.chapter LIKE ? OR l.title LIKE ?)')
+        params.extend([like_kw, like_kw, like_kw])
+
+    if where_clauses:
+        query += ' WHERE ' + ' AND '.join(where_clauses)
+
+    query += ' ORDER BY q.id DESC'
+    cursor.execute(query, tuple(params))
+    rows = cursor.fetchall()
+    conn.close()
+
+    questions = []
+    for row in rows:
+        item = serialize_question(row)
+        item['library_title'] = row['library_title'] if 'library_title' in row.keys() else ''
+        item['library_icon'] = row['library_icon'] if 'library_icon' in row.keys() else '📚'
+        questions.append(item)
+
+    return jsonify({
+        'total': len(questions),
+        'questions': questions
+    })
 
 # 管理后台：更新题集信息
 @app.route('/api/admin/libraries/<lib_id>', methods=['PUT'])
@@ -934,6 +1848,10 @@ def admin_update_library(lib_id):
         description = (data.get('description') or '').strip()
         fields.append('description = ?')
         values.append(description)
+    if 'is_public' in data:
+        is_public = 1 if parse_bool_env(data.get('is_public'), True) else 0
+        fields.append('is_public = ?')
+        values.append(is_public)
 
     if not fields and (not next_lib_id or next_lib_id == lib_id):
         return jsonify({'error': '没有可更新字段'}), 400
@@ -961,6 +1879,7 @@ def admin_update_library(lib_id):
         cursor.execute(f'UPDATE libraries SET {", ".join(fields)} WHERE id = ?', values)
 
     conn.commit()
+    invalidate_public_library_cache()
     result = get_library_with_questions(conn, current_lib_id)
     conn.close()
     return jsonify(result)
@@ -981,6 +1900,7 @@ def admin_delete_library(lib_id):
     cursor.execute('DELETE FROM questions WHERE library_id = ?', (lib_id,))
     cursor.execute('DELETE FROM libraries WHERE id = ?', (lib_id,))
     conn.commit()
+    invalidate_public_library_cache()
     conn.close()
 
     return jsonify({'message': '题集已删除'})
@@ -1014,6 +1934,7 @@ def admin_create_question(lib_id):
     ))
     question_id = cursor.lastrowid
     conn.commit()
+    invalidate_public_library_cache(lib_id)
 
     cursor.execute('SELECT * FROM questions WHERE id = ?', (question_id,))
     question = serialize_question(cursor.fetchone())
@@ -1062,6 +1983,7 @@ def admin_update_question(question_id):
         target_library_id, question_id
     ))
     conn.commit()
+    invalidate_public_library_cache()
 
     cursor.execute('SELECT * FROM questions WHERE id = ?', (question_id,))
     updated = serialize_question(cursor.fetchone())
@@ -1178,6 +2100,7 @@ def admin_batch_update_questions():
         copied_count = len(source_questions)
 
     conn.commit()
+    invalidate_public_library_cache()
     conn.close()
 
     return jsonify({'updated_count': updated_count, 'copied_count': copied_count})
@@ -1188,14 +2111,16 @@ def admin_batch_update_questions():
 def admin_delete_question(question_id):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM questions WHERE id = ?', (question_id,))
-    if not cursor.fetchone():
+    cursor.execute('SELECT library_id FROM questions WHERE id = ?', (question_id,))
+    row = cursor.fetchone()
+    if not row:
         conn.close()
         return jsonify({'error': 'Question not found'}), 404
 
     cursor.execute('DELETE FROM user_answers WHERE question_id = ?', (question_id,))
     cursor.execute('DELETE FROM questions WHERE id = ?', (question_id,))
     conn.commit()
+    invalidate_public_library_cache(row['library_id'])
     conn.close()
     return jsonify({'message': '题目已删除'})
 
@@ -1228,6 +2153,9 @@ def admin_import_libraries_from_json():
     replace_existing = str(request.form.get('replace_existing', '')).strip().lower() in (
         '1', 'true', 'yes', 'on'
     )
+    allow_empty_answer = str(request.form.get('allow_empty_answer', '1')).strip().lower() in (
+        '1', 'true', 'yes', 'on'
+    )
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -1247,6 +2175,7 @@ def admin_import_libraries_from_json():
 
             icon = str(raw_library.get('icon') or '📚').strip() or '📚'
             description = str(raw_library.get('description') or '').strip()
+            is_public = 1 if parse_bool_env(raw_library.get('is_public'), True) else 0
             requested_id = normalize_library_id(raw_library.get('id'))
             questions = raw_library.get('questions')
             if questions is None:
@@ -1269,16 +2198,16 @@ def admin_import_libraries_from_json():
                 if not replace_existing:
                     raise ValueError(f'题集 ID 已存在: {target_library_id}，请修改 JSON 或开启覆盖导入')
                 cursor.execute(
-                    'UPDATE libraries SET title = ?, icon = ?, description = ? WHERE id = ?',
-                    (title, icon, description, target_library_id)
+                    'UPDATE libraries SET title = ?, icon = ?, description = ?, is_public = ? WHERE id = ?',
+                    (title, icon, description, is_public, target_library_id)
                 )
                 cursor.execute('DELETE FROM user_answers WHERE library_id = ?', (target_library_id,))
                 cursor.execute('DELETE FROM questions WHERE library_id = ?', (target_library_id,))
                 replaced_count += 1
             else:
                 cursor.execute(
-                    'INSERT INTO libraries (id, title, icon, description) VALUES (?, ?, ?, ?)',
-                    (target_library_id, title, icon, description)
+                    'INSERT INTO libraries (id, title, icon, description, is_public) VALUES (?, ?, ?, ?, ?)',
+                    (target_library_id, title, icon, description, is_public)
                 )
 
             reserved_ids.add(target_library_id)
@@ -1288,7 +2217,10 @@ def admin_import_libraries_from_json():
                 if not isinstance(raw_question, dict):
                     raise ValueError(f'题集「{title}」第 {question_index} 题格式错误，必须是对象')
                 try:
-                    parsed_question = parse_question_payload(raw_question)
+                    parsed_question = parse_question_payload(
+                        raw_question,
+                        allow_empty_answer=allow_empty_answer
+                    )
                 except ValueError as exc:
                     raise ValueError(f'题集「{title}」第 {question_index} 题: {exc}')
 
@@ -1305,6 +2237,7 @@ def admin_import_libraries_from_json():
                 imported_question_count += 1
 
         conn.commit()
+        invalidate_public_library_cache()
     except ValueError as exc:
         conn.rollback()
         conn.close()
@@ -1315,6 +2248,19 @@ def admin_import_libraries_from_json():
         return jsonify({'error': f'导入失败: {exc}'}), 500
 
     conn.close()
+
+    # 将 JSON 导入记录同步到“采集列表”，便于追溯来自第三方采集器（如 OCS）的题目导入
+    first_library = raw_libraries[0] if raw_libraries and isinstance(raw_libraries[0], dict) else {}
+    save_collector_record(
+        source_filename=uploaded_file.filename or 'import.json',
+        source_size=len(raw_content),
+        library_title=str(first_library.get('title') or ''),
+        library_id=str(first_library.get('id') or ''),
+        library_count=len(imported_library_ids),
+        question_count=imported_question_count,
+        payload={'libraries': raw_libraries}
+    )
+
     return jsonify({
         'message': '导入成功',
         'library_count': len(imported_library_ids),
@@ -1351,6 +2297,7 @@ def admin_export_libraries_as_json():
             'title': lib['title'],
             'icon': lib['icon'],
             'description': lib['description'] if 'description' in lib.keys() else '',
+            'is_public': bool(lib['is_public']) if 'is_public' in lib.keys() else True,
             'questions': questions
         })
 
@@ -1371,6 +2318,631 @@ def admin_export_libraries_as_json():
         mimetype='application/json; charset=utf-8',
         headers={'Content-Disposition': f'attachment; filename=\"{filename}\"'}
     )
+
+@app.route('/api/admin/ai-settings', methods=['GET'])
+@require_admin_auth
+def admin_get_ai_settings():
+    settings = load_ai_settings()
+    merged = sanitize_ai_settings({}, settings)
+    api_key = merged.get('api_key', '')
+    return jsonify({
+        'provider': merged.get('provider', AI_DEFAULT_SETTINGS['provider']),
+        'base_url': merged.get('base_url', AI_DEFAULT_SETTINGS['base_url']),
+        'model': merged.get('model', AI_DEFAULT_SETTINGS['model']),
+        'endpoint_path': merged.get('endpoint_path', AI_DEFAULT_SETTINGS['endpoint_path']),
+        'collector_push_enabled': bool(merged.get('collector_push_enabled', AI_DEFAULT_SETTINGS['collector_push_enabled'])),
+        'collector_push_token': str(merged.get('collector_push_token') or ''),
+        'has_api_key': bool(api_key),
+        'api_key_mask': mask_api_key(api_key)
+    })
+
+@app.route('/api/admin/ai-settings', methods=['POST'])
+@require_admin_auth
+def admin_save_ai_settings():
+    payload = request.get_json(silent=True) or {}
+    existing = load_ai_settings()
+    settings = sanitize_ai_settings(payload, existing)
+    save_ai_settings(settings)
+    return jsonify({
+        'message': 'AI 设置已保存',
+        'provider': settings.get('provider'),
+        'base_url': settings.get('base_url'),
+        'model': settings.get('model'),
+        'endpoint_path': settings.get('endpoint_path'),
+        'collector_push_enabled': bool(settings.get('collector_push_enabled', AI_DEFAULT_SETTINGS['collector_push_enabled'])),
+        'collector_push_token': str(settings.get('collector_push_token') or ''),
+        'has_api_key': bool(settings.get('api_key')),
+        'api_key_mask': mask_api_key(settings.get('api_key', ''))
+    })
+
+@app.route('/api/admin/ai-test', methods=['POST'])
+@require_admin_auth
+def admin_test_ai_connection():
+    payload = request.get_json(silent=True) or {}
+    existing = load_ai_settings()
+    settings = sanitize_ai_settings(payload, existing)
+
+    if not settings.get('api_key'):
+        return jsonify({'error': '请先填写 API Key'}), 400
+    if not settings.get('base_url') and not settings.get('endpoint_path'):
+        return jsonify({'error': '请先填写 Base URL 或 Endpoint Path'}), 400
+    if settings.get('provider') != 'openai_compatible':
+        return jsonify({'error': '当前仅支持 openai_compatible 提供商'}), 400
+
+    test_prompt = 'Return strict JSON: {"ok": true}'
+    start = time.time()
+    try:
+        ai_text = call_openai_compatible_chat(settings, test_prompt)
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 500
+    except Exception as exc:
+        return jsonify({'error': f'连接测试失败: {exc}'}), 500
+    latency_ms = int((time.time() - start) * 1000)
+    snippet = (ai_text or '').strip().replace('\n', ' ')[:200]
+    return jsonify({
+        'message': '连接成功',
+        'latency_ms': latency_ms,
+        'sample': snippet
+    })
+
+@app.route('/api/admin/ai-generate', methods=['POST'])
+@require_admin_auth
+def admin_ai_generate_fields():
+    payload = request.get_json(silent=True) or {}
+    question_text = str(payload.get('question') or '').strip()
+    question_type = str(payload.get('type') or 'single').strip().lower()
+    options = payload.get('options') or []
+    if isinstance(options, str):
+        options = [line.strip() for line in options.splitlines() if line.strip()]
+    if not isinstance(options, list):
+        options = []
+
+    if not question_text:
+        return jsonify({'error': '题目不能为空'}), 400
+
+    settings = sanitize_ai_settings({}, load_ai_settings())
+    if not settings.get('api_key'):
+        return jsonify({'error': '请先在设置中填写 AI API Key'}), 400
+    if not settings.get('base_url') and not settings.get('endpoint_path'):
+        return jsonify({'error': '请先在设置中填写 Base URL 或 Endpoint Path'}), 400
+    if settings.get('provider') != 'openai_compatible':
+        return jsonify({'error': '当前仅支持 openai_compatible 提供商'}), 400
+
+    prompt = build_ai_generate_prompt(question_text, question_type, options)
+    try:
+        ai_text = call_openai_compatible_chat(settings, prompt)
+        result = extract_json_payload(ai_text)
+        if not isinstance(result, dict):
+            raise ValueError('AI 返回格式错误')
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 500
+    except Exception as exc:
+        return jsonify({'error': f'AI 生成失败: {exc}'}), 500
+
+    answer = str(result.get('answer') or '').strip()
+    analysis = str(result.get('analysis') or '').strip()
+    chapter = str(result.get('chapter') or '').strip()
+    return jsonify({
+        'answer': answer,
+        'analysis': analysis,
+        'chapter': chapter
+    })
+
+@app.route('/api/admin/ai-generate-batch', methods=['POST'])
+@require_admin_auth
+def admin_ai_generate_batch():
+    payload = request.get_json(silent=True) or {}
+    items = payload.get('items') or []
+    if not isinstance(items, list) or not items:
+        return jsonify({'error': 'items 不能为空'}), 400
+    if len(items) > 30:
+        return jsonify({'error': 'items 数量过多，请分批（<=30）'}), 400
+
+    normalized_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        question_text = str(item.get('question') or '').strip()
+        if not question_text:
+            normalized_items.append({'question': '', 'type': 'single', 'options': []})
+            continue
+        question_type = str(item.get('type') or 'single').strip().lower()
+        options = item.get('options') or []
+        if isinstance(options, str):
+            options = [line.strip() for line in options.splitlines() if line.strip()]
+        if not isinstance(options, list):
+            options = []
+        normalized_items.append({
+            'question': question_text,
+            'type': question_type,
+            'options': options
+        })
+
+    settings = sanitize_ai_settings({}, load_ai_settings())
+    if not settings.get('api_key'):
+        return jsonify({'error': '请先在设置中填写 AI API Key'}), 400
+    if not settings.get('base_url') and not settings.get('endpoint_path'):
+        return jsonify({'error': '请先在设置中填写 Base URL 或 Endpoint Path'}), 400
+    if settings.get('provider') != 'openai_compatible':
+        return jsonify({'error': '当前仅支持 openai_compatible 提供商'}), 400
+
+    prompt = build_ai_generate_batch_prompt(normalized_items)
+    try:
+        ai_text = call_openai_compatible_chat(settings, prompt)
+        result = extract_json_payload(ai_text)
+        if not isinstance(result, dict) or not isinstance(result.get('items'), list):
+            raise ValueError('AI 返回格式错误')
+        result_items = result.get('items') or []
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 500
+    except Exception as exc:
+        return jsonify({'error': f'AI 生成失败: {exc}'}), 500
+
+    # 兜底对齐长度
+    if len(result_items) < len(normalized_items):
+        result_items.extend([{} for _ in range(len(normalized_items) - len(result_items))])
+    if len(result_items) > len(normalized_items):
+        result_items = result_items[:len(normalized_items)]
+
+    cleaned = []
+    for item in result_items:
+        if not isinstance(item, dict):
+            cleaned.append({'answer': '', 'analysis': '', 'chapter': ''})
+            continue
+        cleaned.append({
+            'answer': str(item.get('answer') or '').strip(),
+            'analysis': str(item.get('analysis') or '').strip(),
+            'chapter': str(item.get('chapter') or '').strip()
+        })
+
+    return jsonify({'items': cleaned})
+
+@app.route('/api/admin/ai-collect', methods=['POST'])
+@require_admin_auth
+def admin_ai_collect_from_file():
+    uploaded_file = request.files.get('file')
+    if not uploaded_file or not uploaded_file.filename:
+        return jsonify({'error': '请上传题目文件'}), 400
+
+    raw_content = uploaded_file.read()
+    if not raw_content:
+        return jsonify({'error': '上传文件为空'}), 400
+    if len(raw_content) > 400_000:
+        return jsonify({'error': '文件过大，请控制在 400KB 以内'}), 400
+
+    try:
+        source_text = raw_content.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return jsonify({'error': '文件编码不支持，请使用 UTF-8'}), 400
+
+    settings = sanitize_ai_settings({}, load_ai_settings())
+    if not settings.get('api_key'):
+        return jsonify({'error': '请先在设置中填写 AI API Key'}), 400
+
+    provider = settings.get('provider', AI_DEFAULT_SETTINGS['provider'])
+    if not settings.get('base_url') and not settings.get('endpoint_path'):
+        return jsonify({'error': '请先在设置中填写 Base URL 或 Endpoint Path'}), 400
+    library_title = (request.form.get('library_title') or '').strip()
+    library_id = normalize_library_id(request.form.get('library_id'))
+
+    if provider != 'openai_compatible':
+        return jsonify({'error': '当前仅支持 openai_compatible 提供商'}), 400
+
+    prompt = build_ai_collect_prompt(source_text, library_title or 'AI 采集题库', library_id or '')
+
+    try:
+        ai_text = call_openai_compatible_chat(settings, prompt)
+        payload = extract_json_payload(ai_text)
+        libraries = extract_import_libraries(payload)
+        if isinstance(payload, list) or (isinstance(payload, dict) and 'libraries' not in payload):
+            payload = {'libraries': libraries}
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 500
+    except Exception as exc:
+        return jsonify({'error': f'AI 解析失败: {exc}'}), 500
+
+    question_count = count_questions_in_libraries(libraries)
+
+    source_filename = uploaded_file.filename or ''
+    record_id = save_collector_record(
+        source_filename=source_filename,
+        source_size=len(raw_content),
+        library_title=library_title or 'AI 采集题库',
+        library_id=library_id or '',
+        library_count=len(libraries),
+        question_count=question_count,
+        payload=payload
+    )
+
+    return jsonify({
+        'message': 'AI 识别完成',
+        'library_count': len(libraries),
+        'question_count': question_count,
+        'payload': payload,
+        'record_id': record_id
+    })
+
+@app.route('/api/admin/collector-records', methods=['GET'])
+@require_admin_auth
+def admin_get_collector_records():
+    try:
+        limit = int(request.args.get('limit', 50))
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 200))
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, source_filename, source_size, library_title, library_id,
+               library_count, question_count, payload, created_at
+        FROM collector_records
+        ORDER BY id DESC
+        LIMIT ?
+    ''', (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    records = []
+    questions = []
+    seq = 1
+
+    def _normalize_options_text(raw_options):
+        if isinstance(raw_options, list):
+            return '\n'.join([str(item).strip() for item in raw_options if str(item).strip()])
+        if isinstance(raw_options, str):
+            return raw_options.strip()
+        return ''
+
+    def _normalize_answer_text(raw_answer):
+        if isinstance(raw_answer, list):
+            return ','.join([str(item).strip() for item in raw_answer if str(item).strip()])
+        if raw_answer is None:
+            return ''
+        return str(raw_answer).strip()
+
+    def _append_question(record_id, created_at, item, fallback_type='single'):
+        nonlocal seq
+        if not isinstance(item, dict):
+            return
+        question_text = str(item.get('question') or item.get('q') or '').strip()
+        answer_text = _normalize_answer_text(item.get('answer', item.get('ans')))
+        options_text = _normalize_options_text(item.get('options'))
+        question_type = normalize_question_type(item.get('type') or fallback_type)
+        if not question_text and not answer_text and not options_text:
+            return
+        questions.append({
+            'seq': seq,
+            'record_id': record_id,
+            'type': question_type,
+            'question': question_text,
+            'options': options_text,
+            'answer': answer_text,
+            'created_at': created_at
+        })
+        seq += 1
+
+    for row in rows:
+        row_get = row.get if hasattr(row, 'get') else lambda key, default='': row[key] if key in row.keys() else default
+        record_id = row_get('id', '')
+        created_at = row_get('created_at', '')
+        records.append({
+            'id': record_id,
+            'source_filename': row_get('source_filename', ''),
+            'source_size': row_get('source_size', 0),
+            'library_title': row_get('library_title', ''),
+            'library_id': row_get('library_id', ''),
+            'library_count': row_get('library_count', 0),
+            'question_count': row_get('question_count', 0),
+            'created_at': created_at
+        })
+
+        payload_raw = row_get('payload', '')
+        payload_obj = None
+        if isinstance(payload_raw, (dict, list)):
+            payload_obj = payload_raw
+        else:
+            try:
+                payload_obj = json.loads(str(payload_raw or '').strip() or '{}')
+            except json.JSONDecodeError:
+                payload_obj = None
+
+        before_count = len(questions)
+        libraries = []
+        if isinstance(payload_obj, dict) and isinstance(payload_obj.get('libraries'), list):
+            libraries = payload_obj.get('libraries') or []
+        elif isinstance(payload_obj, list):
+            libraries = payload_obj
+
+        for lib in libraries:
+            if not isinstance(lib, dict):
+                continue
+            for item in (lib.get('questions') or []):
+                _append_question(record_id, created_at, item)
+
+        if len(questions) == before_count and isinstance(payload_obj, dict):
+            # 兜底：兼容未封装为 libraries 的推送结构
+            guessed = {
+                'question': payload_obj.get('question') or payload_obj.get('title') or '',
+                'type': payload_obj.get('type') or 'single',
+                'options': payload_obj.get('options') or '',
+                'answer': (
+                    payload_obj.get('answer')
+                    if payload_obj.get('answer') is not None
+                    else (
+                        payload_obj.get('data', {}).get('data')
+                        if isinstance(payload_obj.get('data'), dict)
+                        else ''
+                    )
+                )
+            }
+            _append_question(record_id, created_at, guessed, guessed.get('type') or 'single')
+
+    return jsonify({'records': records, 'questions': questions, 'count': len(records), 'question_count': len(questions)})
+
+@app.route('/api/admin/collector-records/<int:record_id>', methods=['DELETE'])
+@require_admin_auth
+def admin_delete_collector_record(record_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM collector_records WHERE id = ?', (record_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': '采集记录不存在'}), 404
+    cursor.execute('DELETE FROM collector_records WHERE id = ?', (record_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': '采集记录已删除'})
+
+@app.route('/api/admin/query', methods=['POST'])
+def admin_push_collector_record():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
+
+    runtime_settings = sanitize_ai_settings({}, load_ai_settings())
+    collector_push_enabled = bool(runtime_settings.get('collector_push_enabled', AI_DEFAULT_SETTINGS['collector_push_enabled']))
+    collector_push_token = str(runtime_settings.get('collector_push_token') or '').strip()
+
+    token = (
+        request.headers.get('X-Collector-Token')
+        or request.headers.get('x-collector-token')
+        or request.args.get('token')
+        or request.form.get('token')
+        or data.get('token')
+        or ''
+    )
+    auth_header = request.headers.get('Authorization', '')
+    if not token and isinstance(auth_header, str) and auth_header.lower().startswith('bearer '):
+        token = auth_header[7:].strip()
+
+    if not collector_push_enabled and not is_admin_authenticated():
+        return jsonify({'error': '采集推送已关闭'}), 403
+
+    # 管理员登录态可直接推送；若配置了 COLLECTOR_PUSH_TOKEN，则要求携带令牌
+    if not is_admin_authenticated() and collector_push_token and str(token).strip() != collector_push_token:
+        return jsonify({'error': '无权限推送采集记录，请检查 token'}), 401
+
+    raw_payload = data.get('payload')
+    if raw_payload is None:
+        if isinstance(data.get('libraries'), list):
+            raw_payload = {'libraries': data.get('libraries')}
+        elif isinstance(data.get('data'), (dict, list)):
+            raw_payload = data.get('data')
+        else:
+            raw_payload = data
+
+    def _to_int(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _extract_question_from_item(item, fallback_type='single'):
+        if not isinstance(item, dict):
+            return None
+        question = str(item.get('question') or item.get('q') or item.get('title') or '').strip()
+        answer = str(item.get('answer') if item.get('answer') is not None else item.get('ans') or '').strip()
+        q_type = normalize_question_type(item.get('type') or fallback_type or 'single')
+        options = parse_options_for_lookup(item.get('options'))
+        if not question and not answer and not options:
+            return None
+        return {
+            'question': question,
+            'answer': answer,
+            'type': q_type,
+            'options': options
+        }
+
+    # 解析推送中的题目
+    payload_libraries = []
+    if isinstance(raw_payload, dict) and isinstance(raw_payload.get('libraries'), list):
+        payload_libraries = raw_payload.get('libraries') or []
+    elif isinstance(raw_payload, list):
+        payload_libraries = raw_payload
+
+    extracted_questions = []
+    if payload_libraries:
+        for lib in payload_libraries:
+            if not isinstance(lib, dict):
+                continue
+            for item in (lib.get('questions') or []):
+                parsed = _extract_question_from_item(item, item.get('type') if isinstance(item, dict) else 'single')
+                if not parsed:
+                    continue
+                parsed['ref'] = item if isinstance(item, dict) else None
+                extracted_questions.append(parsed)
+    elif isinstance(raw_payload, dict):
+        parsed = _extract_question_from_item(raw_payload, raw_payload.get('type') if isinstance(raw_payload, dict) else 'single')
+        if parsed:
+            parsed['ref'] = raw_payload
+            extracted_questions.append(parsed)
+
+    # 兜底：兼容直接推 title/options/type 的请求
+    if not extracted_questions:
+        fallback_item = {
+            'question': data.get('title') or data.get('question') or '',
+            'type': data.get('type') or 'single',
+            'options': data.get('options') or '',
+            'answer': data.get('answer') or ''
+        }
+        parsed = _extract_question_from_item(fallback_item, fallback_item.get('type') or 'single')
+        if parsed:
+            parsed['ref'] = None
+            extracted_questions.append(parsed)
+
+    # 按“题库优先，AI 兜底”解析答案
+    resolved_questions = []
+    ai_error = ''
+    for item in extracted_questions:
+        question = item.get('question', '')
+        q_type = item.get('type', 'single')
+        options = item.get('options') or []
+        answer = str(item.get('answer') or '').strip()
+        source = 'payload' if answer else ''
+
+        if not answer:
+            answer = find_answer_from_question_bank(question, q_type)
+            if answer:
+                source = 'bank'
+
+        if not answer:
+            answer = find_answer_from_collector_records(question, q_type)
+            if answer:
+                source = 'collector'
+
+        if not answer:
+            try:
+                answer = generate_answer_by_ai(question, q_type, options)
+            except Exception as exc:
+                ai_error = str(exc)
+                answer = ''
+            if answer:
+                source = 'ai'
+
+        ref = item.get('ref')
+        if answer and isinstance(ref, dict):
+            if ref.get('answer') is None and ref.get('ans') is None:
+                ref['answer'] = answer
+            elif str(ref.get('answer') if ref.get('answer') is not None else ref.get('ans') or '').strip() == '':
+                ref['answer'] = answer
+
+        resolved_questions.append({
+            'question': question,
+            'type': q_type,
+            'options': options,
+            'answer': answer,
+            'source': source or ('none' if question else '')
+        })
+
+    # 若 payload 不包含 libraries，构造统一结构以便采集列表展示
+    payload_for_save = raw_payload
+    libraries_for_save = payload_libraries
+    if not libraries_for_save and resolved_questions:
+        auto_library_id = normalize_library_id(data.get('library_id') or 'ocs-push') or 'ocs-push'
+        auto_library_title = str(data.get('library_title') or 'OCS 采集').strip() or 'OCS 采集'
+        libraries_for_save = [{
+            'id': auto_library_id,
+            'title': auto_library_title,
+            'questions': [
+                {
+                    'question': q.get('question', ''),
+                    'type': q.get('type', 'single'),
+                    'options': q.get('options', []),
+                    'answer': q.get('answer', '')
+                }
+                for q in resolved_questions
+            ]
+        }]
+        payload_for_save = {
+            'source': raw_payload,
+            'libraries': libraries_for_save
+        }
+
+    first_library = libraries_for_save[0] if libraries_for_save and isinstance(libraries_for_save[0], dict) else {}
+    inferred_library_count = len(libraries_for_save) if libraries_for_save else (1 if resolved_questions else 0)
+    inferred_question_count = count_questions_in_libraries(libraries_for_save) if libraries_for_save else len(resolved_questions)
+    try:
+        inferred_payload_size = len(json.dumps(payload_for_save, ensure_ascii=False).encode('utf-8'))
+    except Exception:
+        inferred_payload_size = 0
+
+    source_filename = str(
+        data.get('source_filename')
+        or data.get('filename')
+        or data.get('source')
+        or 'ocs-push.json'
+    ).strip() or 'ocs-push.json'
+    library_title = str(
+        data.get('library_title')
+        or first_library.get('title')
+        or 'OCS 采集'
+    ).strip()
+    library_id = str(
+        data.get('library_id')
+        or first_library.get('id')
+        or ''
+    ).strip()
+    source_size = max(0, _to_int(data.get('source_size'), inferred_payload_size))
+    library_count = max(0, _to_int(data.get('library_count'), inferred_library_count))
+    question_count = max(0, _to_int(data.get('question_count'), inferred_question_count))
+
+    merge_result = {'merged_count': 0, 'updated_count': 0, 'library_ids': []}
+    merge_error = ''
+    try:
+        merge_result = upsert_collector_libraries_into_question_bank(
+            libraries_for_save,
+            fallback_library_id=normalize_library_id(library_id or 'collector-history') or 'collector-history',
+            fallback_library_title=library_title or '采集历史题库'
+        )
+    except Exception as exc:
+        merge_error = str(exc)
+
+    record_id = save_collector_record(
+        source_filename=source_filename,
+        source_size=source_size,
+        library_title=library_title,
+        library_id=library_id,
+        library_count=library_count,
+        question_count=question_count,
+        payload=payload_for_save
+    )
+    if not record_id:
+        return jsonify({'error': '采集记录保存失败'}), 500
+
+    primary = None
+    for item in resolved_questions:
+        if item.get('answer'):
+            primary = item
+            break
+    if not primary and resolved_questions:
+        primary = resolved_questions[0]
+    primary_answer = str(primary.get('answer') or '').strip() if primary else ''
+
+    return jsonify({
+        'message': '采集记录已写入',
+        'record_id': record_id,
+        'library_count': library_count,
+        'question_count': question_count,
+        'collector_push_enabled': collector_push_enabled,
+        'token_required': bool(collector_push_token),
+        'code': 1 if primary_answer else 0,
+        'data': primary_answer,
+        'answer': primary_answer,
+        'source': primary.get('source') if primary else '',
+        'results': resolved_questions,
+        'ai_error': ai_error,
+        'merged_count': int(merge_result.get('merged_count') or 0),
+        'updated_count': int(merge_result.get('updated_count') or 0),
+        'merged_library_ids': merge_result.get('library_ids') or [],
+        'merge_error': merge_error
+    })
 
 @app.route('/api/admin/session', methods=['GET'])
 def admin_session_status():

@@ -34,6 +34,65 @@
             .sidebar-overlay.active { display: block; }
         }
 
+        /* 手机端顶部工具栏：均匀分布且支持横向拖动 */
+        @media (max-width: 768px) {
+            nav {
+                display: grid !important;
+                grid-template-columns: auto minmax(0, 1fr);
+                gap: 0.5rem;
+                padding-left: 0.5rem !important;
+                padding-right: 0.5rem !important;
+            }
+            #top-brand {
+                min-width: max-content;
+                gap: 0.35rem !important;
+            }
+            #top-actions {
+                min-width: 0;
+                display: flex !important;
+                align-items: center;
+                gap: 0.45rem;
+                overflow-x: auto;
+                overflow-y: hidden;
+                -webkit-overflow-scrolling: touch;
+                scrollbar-width: none;
+                -ms-overflow-style: none;
+                padding-bottom: 2px;
+            }
+            #top-actions::-webkit-scrollbar { display: none; }
+            #top-actions > * {
+                flex: 0 0 auto;
+                min-width: 2.25rem;
+            }
+            #top-actions button,
+            #top-actions a {
+                touch-action: manipulation;
+            }
+            /* 下拉面板改为 fixed，避免被横向滚动容器裁切导致“点击无反应” */
+            #top-actions #font-size-wrap,
+            #top-actions #mode-switch-wrap {
+                position: static !important;
+            }
+            #top-actions #font-size-panel,
+            #top-actions #mode-switch-menu {
+                position: fixed !important;
+                top: calc(env(safe-area-inset-top, 0px) + 4.25rem) !important;
+                right: 0.5rem !important;
+                left: auto !important;
+                z-index: 160 !important;
+            }
+            #top-actions #font-size-panel {
+                width: min(16rem, calc(100vw - 1rem)) !important;
+            }
+            #top-actions #font-size-btn,
+            #top-actions #mode-switch-btn {
+                width: auto;
+                justify-content: center;
+                padding-left: 0.5rem;
+                padding-right: 0.5rem;
+            }
+        }
+
         /* 答题卡网格点 (红绿逻辑) */
         .n-item { 
             width: calc(20% - 8px); min-width: 40px; aspect-ratio: 1;
@@ -320,3 +379,63 @@
             background: #4338ca !important;
             color: #eef2ff !important;
         }
+        body.theme-dark {
+            color-scheme: dark;
+            scrollbar-color: rgba(71, 85, 105, 0.9) rgba(2, 6, 23, 0.6);
+        }
+        body.theme-dark ::-webkit-scrollbar-thumb { background: rgba(71, 85, 105, 0.9); }
+        body.theme-dark ::-webkit-scrollbar-track { background: rgba(2, 6, 23, 0.6); }
+        body.theme-dark .text-slate-900,
+        body.theme-dark .text-slate-800,
+        body.theme-dark .text-slate-700 {
+            color: #e2e8f0 !important;
+        }
+        body.theme-dark .text-slate-600 { color: #cbd5e1 !important; }
+        body.theme-dark .text-slate-500,
+        body.theme-dark .text-slate-400,
+        body.theme-dark .text-slate-300 {
+            color: #94a3b8 !important;
+        }
+        body.theme-dark .border-slate-100,
+        body.theme-dark .border-slate-200,
+        body.theme-dark .border-slate-300 {
+            border-color: rgba(71, 85, 105, 0.7) !important;
+        }
+        body.theme-dark .bg-white,
+        body.theme-dark .bg-white\/95 {
+            background: rgba(15, 23, 42, 0.92) !important;
+            color: #e2e8f0 !important;
+        }
+        body.theme-dark .bg-slate-50,
+        body.theme-dark .bg-slate-100,
+        body.theme-dark .bg-slate-200 {
+            background: rgba(30, 41, 59, 0.92) !important;
+            color: #cbd5e1 !important;
+        }
+        body.theme-dark .bg-indigo-50 {
+            background: rgba(79, 70, 229, 0.2) !important;
+            color: #c7d2fe !important;
+            border-color: rgba(129, 140, 248, 0.45) !important;
+        }
+        body.theme-dark .text-indigo-600 { color: #a5b4fc !important; }
+        body.theme-dark .bg-emerald-100 {
+            background: rgba(16, 185, 129, 0.18) !important;
+            color: #a7f3d0 !important;
+            border-color: rgba(16, 185, 129, 0.35) !important;
+        }
+        body.theme-dark .text-emerald-700 { color: #a7f3d0 !important; }
+        body.theme-dark .border-emerald-200 { border-color: rgba(16, 185, 129, 0.35) !important; }
+        body.theme-dark .bg-rose-100 {
+            background: rgba(244, 63, 94, 0.18) !important;
+            color: #fecdd3 !important;
+            border-color: rgba(244, 63, 94, 0.35) !important;
+        }
+        body.theme-dark .text-rose-600 { color: #fda4af !important; }
+        body.theme-dark .border-rose-200 { border-color: rgba(244, 63, 94, 0.35) !important; }
+        body.theme-dark .bg-amber-100 {
+            background: rgba(245, 158, 11, 0.18) !important;
+            color: #fcd34d !important;
+            border-color: rgba(245, 158, 11, 0.35) !important;
+        }
+        body.theme-dark .text-amber-600 { color: #fcd34d !important; }
+        body.theme-dark .border-amber-200 { border-color: rgba(245, 158, 11, 0.35) !important; }

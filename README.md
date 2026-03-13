@@ -1,18 +1,25 @@
-# 题库项目结构说明
+# Q 题库系统（Flask）
+
+一个支持做题、题库管理、导入导出、AI 识别导入、OCS 推送采集的题库系统。  
+后端支持 SQLite / MySQL，新增可选 Redis 缓存。
+
+---
 
 ## 目录结构
 
 ```text
 Q/
-├─ app.py                  # Flask 服务入口（路由 + API）
-├─ init_db.py              # 初始化数据库脚本
-├─ quiz.db                 # SQLite 数据库（可选）
-├─ 题库示例.json           # 示例导入数据
-├─ templates/              # 页面模板（只放 HTML 结构）
+├─ app.py                  # Flask 服务入口（页面 + API）
+├─ init_db.py              # SQLite 初始化脚本
+├─ quiz.db                 # SQLite 数据库（DB_BACKEND=sqlite 时）
+├─ ai_settings.json        # AI/采集推送配置
+├─ ocs题库配置.json         # OCS 示例配置
+├─ 题库示例.json            # 示例导入数据
+├─ templates/
 │  ├─ index.html
 │  ├─ admin.html
 │  └─ admin_login.html
-└─ static/                 # 静态资源
+└─ static/
    ├─ css/
    │  ├─ index.css
    │  ├─ admin.css
@@ -23,89 +30,182 @@ Q/
       └─ admin_login.js
 ```
 
-## 约定
+---
 
-- `templates/*.html`：只负责页面结构和挂载点（避免内联大段 CSS/JS）。
-- `static/css/*.css`：页面样式按页面拆分，便于独立优化。
-- `static/js/*.js`：页面逻辑按页面拆分，避免单文件过大。
-- API 基地址通过 `data-*` 配置：
-  - 做题页：`data-api-base`
-  - 管理页：`data-admin-api-base`
-  - 登录页：`data-admin-login-api`
+## 主要功能
 
-## JSON 导入导出
+- 前台刷题（多模式）
+- 管理后台：
+  - 题库管理
+  - 题集管理（支持“公开/私有”）
+  - 导入题库（批量导入 / 文档导入 / 单题导入 / 识别导入）
+  - 导出题库
+  - 采集列表
+- OCS 推送查询接口：`POST /api/admin/query`
+  - 题库有答案优先返回
+  - 没有答案时 AI 兜底
+  - 推送记录会并入本地题库
 
-- 导入：管理页点击导入图标，调用 `POST /api/admin/import-json`
-- 导出：管理页点击导出图标，调用 `GET /api/admin/export-json`
-  - 可选参数：`library_id`（仅导出某个题集）
+---
 
-## MySQL 配置
+## 依赖安装
 
-项目已支持 MySQL（同时兼容 SQLite）：
-
-- `DB_BACKEND=mysql` 时使用 MySQL
-- `DB_BACKEND=sqlite`（默认）时使用本地 `quiz.db`
-
-可配置环境变量：
-
-- `MYSQL_HOST`（默认：`mysql3.sqlpub.com`）
-- `MYSQL_PORT`（默认：`3308`）
-- `MYSQL_DATABASE`（默认：`z721683736`）
-- `MYSQL_USER`（默认：`z2004y`）
-- `MYSQL_PASSWORD`（必填，建议在环境变量中配置）
-
-## Vercel 部署（Flask）
-
-### 1) 准备部署文件
-
-在项目根目录新建 `requirements.txt`：
-
-```txt
-Flask>=2.3,<4
+```bash
+pip install -r requirements.txt
 ```
 
-在项目根目录新建 `vercel.json`：
+当前依赖：
 
-```json
-{
-  "version": 2,
-  "builds": [
-    { "src": "app.py", "use": "@vercel/python" }
-  ],
-  "routes": [
-    { "src": "/(.*)", "dest": "app.py" }
-  ]
-}
+- Flask>=2.3,<4
+- PyMySQL>=1.1,<2
+- redis>=5,<7
+
+---
+
+## 启动
+
+```bash
+python app.py
 ```
 
-### 2) 推送到 Git 仓库
+默认地址：`http://127.0.0.1:5000`
 
-将代码推送到 GitHub/GitLab/Bitbucket 仓库。
+---
 
-### 3) 在 Vercel 导入项目
+## 数据库配置
 
-1. 打开 Vercel 控制台，点击 **Add New -> Project**
-2. 选择你的仓库并导入
-3. Framework Preset 可选 **Other**
-4. 保持默认 Build/Output 配置，点击 **Deploy**
+通过环境变量切换数据库：
 
-### 4) 配置环境变量（建议）
+- `DB_BACKEND=sqlite`（默认，本地 `quiz.db`）
+- `DB_BACKEND=mysql`
+- `DB_PATH`（可选，SQLite 文件路径；Vercel 默认使用 `/tmp/quiz.db`）
 
-在 Vercel 项目设置中添加：
+MySQL 环境变量：
+
+- `MYSQL_HOST`
+- `MYSQL_PORT`（默认 3308）
+- `MYSQL_DATABASE`
+- `MYSQL_USER`
+- `MYSQL_PASSWORD`
+
+---
+
+## 管理员配置
 
 - `FLASK_SECRET_KEY`
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
-- `DB_BACKEND`（建议 `mysql`）
+
+---
+
+## AI 与采集推送配置
+
+AI 设置和采集推送开关保存在 `ai_settings.json`（可在后台“AI 设置”页面修改）：
+
+- `collector_push_enabled`：是否开启 OCS 推送
+- `collector_push_token`：可选，不填则不要求携带 token
+
+> 兼容环境变量默认值：
+>
+> - `COLLECTOR_PUSH`（默认 true）
+> - `COLLECTOR_PUSH_TOKEN`（默认空）
+> - `AI_SETTINGS_PATH`（可选；Vercel 默认 `/tmp/ai_settings.json`）
+
+推送接口：
+
+- `POST /api/admin/query`
+
+可通过以下方式携带 token（任选）：
+
+- Header: `X-Collector-Token`
+- `Authorization: Bearer <token>`
+- query/form/json 中的 `token`
+
+---
+
+## Redis（可选）
+
+已接入 Redis 用于前台公开题集缓存（列表/详情）。  
+Redis 不可用时会自动回退到数据库直查。
+
+环境变量：
+
+- `REDIS_ENABLED`（默认 true）
+- `REDIS_URL`（优先）
+- 或：
+  - `REDIS_HOST`（默认 127.0.0.1）
+  - `REDIS_PORT`（默认 6379）
+  - `REDIS_DB`（默认 0）
+  - `REDIS_PASSWORD`
+- `REDIS_CACHE_PREFIX`（默认 `quiz`）
+- `REDIS_PUBLIC_LIB_CACHE_TTL`（默认 120 秒）
+
+---
+
+## 公开/私有题集规则
+
+- 前台 `GET /api/libraries` 仅返回公开题集
+- 私有题集仅后台可见
+- 在“题集管理”可设置题集是否公开，并支持筛选：
+  - 全部
+  - 仅公开
+  - 仅私有
+
+---
+
+## 导入导出
+
+- 导入：`POST /api/admin/import-json`
+- 导出：`GET /api/admin/export-json`
+  - 可选参数：`library_id`（只导出一个题集）
+
+---
+
+## Vercel 部署
+
+### 1) 准备
+
+- 保留根目录 `requirements.txt`、`vercel.json`
+- 入口为 `app.py`（已适配 `@vercel/python`）
+
+### 2) 推荐环境变量（Vercel Project Settings → Environment Variables）
+
+必填：
+
+- `FLASK_SECRET_KEY`
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
+
+生产强烈建议（持久化）：
+
+- `DB_BACKEND=mysql`
 - `MYSQL_HOST`
 - `MYSQL_PORT`
 - `MYSQL_DATABASE`
 - `MYSQL_USER`
 - `MYSQL_PASSWORD`
 
-### 5) 重要说明
+可选：
 
-如果在 Vercel 使用 SQLite（`DB_BACKEND=sqlite`），重部署或实例回收后数据可能丢失。
+- `REDIS_URL`（启用 Redis 缓存）
+- `COLLECTOR_PUSH`
+- `COLLECTOR_PUSH_TOKEN`
 
-- 仅做演示：可直接部署，数据变更不保证持久化。
-- 生产环境：建议使用外部 MySQL 并设置 `DB_BACKEND=mysql`。
+### 3) 一键部署
+
+```bash
+vercel
+```
+
+首次按提示选择项目；生产发布：
+
+```bash
+vercel --prod
+```
+
+### 4) 说明
+
+- 如果你用 SQLite，Vercel 仅临时可写目录 `/tmp`，实例重建后数据会丢失（不建议生产）。
+- 本项目在 Vercel 下默认：
+  - SQLite 路径：`/tmp/quiz.db`
+  - AI 设置路径：`/tmp/ai_settings.json`

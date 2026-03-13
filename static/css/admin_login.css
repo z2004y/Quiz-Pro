@@ -54,3 +54,10 @@ body {
             background: #4338ca !important;
             color: #eef2ff !important;
         }
+        body.theme-dark {
+            color-scheme: dark;
+            scrollbar-color: rgba(71, 85, 105, 0.9) rgba(2, 6, 23, 0.6);
+        }
+        body.theme-dark ::-webkit-scrollbar-thumb { background: rgba(71, 85, 105, 0.9); }
+        body.theme-dark ::-webkit-scrollbar-track { background: rgba(2, 6, 23, 0.6); }
+        body.theme-dark input::placeholder { color: #64748b !important; }

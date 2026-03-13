@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS libraries (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     icon TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT ''
+    description TEXT NOT NULL DEFAULT '',
+    is_public INTEGER NOT NULL DEFAULT 1
 )
 ''')
 
@@ -37,6 +38,9 @@ CREATE TABLE IF NOT EXISTS questions (
 )
 ''')
 
+# 索引优化
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_questions_library_id ON questions(library_id)')
+
 # 创建用户答题记录表
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS user_answers (
@@ -51,10 +55,14 @@ CREATE TABLE IF NOT EXISTS user_answers (
 )
 ''')
 
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_answers_library_id ON user_answers(library_id)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_answers_question_id ON user_answers(question_id)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_answers_created_at ON user_answers(created_at)')
+
 # 插入示例题库
 cursor.execute('''
-INSERT OR IGNORE INTO libraries (id, title, icon, description)
-VALUES ('demo', '全端适配测试题库', '📱', '覆盖移动端适配、Flex 布局、HTML/CSS/JavaScript 基础知识点。')
+INSERT OR IGNORE INTO libraries (id, title, icon, description, is_public)
+VALUES ('demo', '全端适配测试题库', '📱', '覆盖移动端适配、Flex 布局、HTML/CSS/JavaScript 基础知识点。', 1)
 ''')
 
 # 插入示例题目（符合新的字段结构）

@@ -1,0 +1,21 @@
+[
+  {
+    "name": "Q本地题库(查询+采集)",
+    "homepage": "http://127.0.0.1:5000/admin/collector-list",
+    "url": "http://127.0.0.1:5000/api/admin/query",
+    "method": "post",
+    "type": "GM_xmlhttpRequest",
+    "contentType": "json",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "data": {
+      "title": "${title}",
+      "options": "${options}",
+      "type": "${type}",
+      "source_filename": "ocs-direct.json",
+      "library_title": "OCS直推"
+    },
+    "handler": "return (res)=> res && res.code === 1 ? [undefined, res.data] : undefined"
+  }
+]

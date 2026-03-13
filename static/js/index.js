@@ -1623,13 +1623,38 @@
                 if(state.timeLeft <= 0) submitExam(true);
             }, 1000);
         }
+        function syncSidebarForViewportChange() {
+            const sb = $('sidebar');
+            const ov = $('overlay');
+            if (!sb || !ov || !state.mode) return;
+
+            if (window.innerWidth <= 768) {
+                // 桌面态可能残留 hidden，导致手机端点击按钮无法拉出侧边栏。
+                sb.classList.remove('hidden');
+                sb.classList.remove('active');
+                ov.classList.remove('active');
+                return;
+            }
+
+            sb.classList.remove('active');
+            ov.classList.remove('active');
+            sb.classList.toggle('hidden', state.mode !== 'exam');
+        }
+
         function toggleSidebar(force) {
             const sb = $('sidebar'); const ov = $('overlay');
+            if (!sb || !ov) return;
             if(window.innerWidth <= 768) {
-                const isActive = force !== undefined ? force : !sb.classList.contains('active');
+                // 手机上确保不是 hidden，否则 active 状态不会生效。
+                sb.classList.remove('hidden');
+                const isActive = force !== undefined ? !!force : !sb.classList.contains('active');
                 sb.classList.toggle('active', isActive);
                 ov.classList.toggle('active', isActive);
-            } else { sb.classList.toggle('hidden'); }
+            } else {
+                sb.classList.toggle('hidden');
+                sb.classList.remove('active');
+                ov.classList.remove('active');
+            }
         }
         async function goHome(conf = false) { 
             const hasInProgressSession = ['browse', 'practice', 'exam'].includes(state.mode);
@@ -1727,10 +1752,12 @@
             window.addEventListener('resize', () => {
                 syncViewportHeight();
                 syncDeviceProfileClass();
+                syncSidebarForViewportChange();
             });
             window.addEventListener('orientationchange', () => {
                 syncViewportHeight();
                 syncDeviceProfileClass();
+                syncSidebarForViewportChange();
             });
             updateQuestionFontSizePreview();
             updateCompactnessPreview();
