@@ -577,14 +577,30 @@ D. My parents object to my going out alone at night.
             formData.append('file', file);
             formData.append('replace_existing', replaceExisting);
             formData.append('allow_empty_answer', allowEmptyAnswer ? '1' : '0');
+            const submitBtn = $('collector-import-btn');
+            const originalText = submitBtn ? submitBtn.innerText : '';
+            if (submitBtn && submitBtn.disabled) return;
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerText = '导入中...';
+            }
             try {
-                const result = await api('/import-json', { method: 'POST', body: formData });
+                const result = await api('/import-json', {
+                    method: 'POST',
+                    body: formData,
+                    timeoutMs: 180000
+                });
                 const replacedText = result.replaced_count ? `，覆盖 ${result.replaced_count} 个题集` : '';
                 notify(`导入成功：${result.library_count} 个题集，${result.question_count} 道题${replacedText}`);
                 resetCollectorState();
                 await loadLibraries();
             } catch (error) {
                 notify(error.message || '导入失败', true);
+            } finally {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = originalText || '导入题库';
+                }
             }
         }
 
@@ -2853,26 +2869,47 @@ D. My parents object to my going out alone at night.
         }
 
         async function api(path, options = {}) {
-            const customHeaders = options.headers || {};
+            const {
+                timeoutMs,
+                ...requestOptions
+            } = options || {};
+            const customHeaders = requestOptions.headers || {};
             const config = {
                 credentials: 'same-origin',
-                ...options
+                ...requestOptions
             };
             if (!(config.body instanceof FormData)) {
                 config.headers = { 'Content-Type': 'application/json', ...customHeaders };
             } else {
                 config.headers = { ...customHeaders };
             }
-            const response = await fetch(`${API_BASE}${path}`, config);
-            const data = await response.json().catch(() => ({}));
-            if (response.status === 401) {
-                window.location.href = '/admin/login';
-                throw new Error('登录已失效，请重新登录');
+            const resolvedTimeoutMs = Math.max(5000, toIntegerOrDefault(timeoutMs, 30000));
+            let timer = null;
+            if (!config.signal) {
+                const controller = new AbortController();
+                config.signal = controller.signal;
+                timer = setTimeout(() => controller.abort(), resolvedTimeoutMs);
             }
-            if (!response.ok) {
-                throw new Error(data.error || '请求失败');
+
+            try {
+                const response = await fetch(`${API_BASE}${path}`, config);
+                const data = await response.json().catch(() => ({}));
+                if (response.status === 401) {
+                    window.location.href = '/admin/login';
+                    throw new Error('登录已失效，请重新登录');
+                }
+                if (!response.ok) {
+                    throw new Error(data.error || '请求失败');
+                }
+                return data;
+            } catch (error) {
+                if (error && error.name === 'AbortError') {
+                    throw new Error(`请求超时（${Math.round(resolvedTimeoutMs / 1000)} 秒），请稍后重试`);
+                }
+                throw error;
+            } finally {
+                if (timer) clearTimeout(timer);
             }
-            return data;
         }
 
         function parseDownloadFilename(contentDisposition, fallbackName) {
@@ -3393,7 +3430,13 @@ D. My parents object to my going out alone at night.
             applyAdminPageMode();
         }
 
-        async function loadLibraries(preferredLibraryId) {
+        async function loadLibraries(preferredLibraryId, options = {}) {
+            const shouldLoadDetails = options.loadDetails !== undefined
+                ? Boolean(options.loadDetails)
+                : isAdminPage('library-management');
+            const shouldLoadQuestionBank = options.loadQuestionBank !== undefined
+                ? Boolean(options.loadQuestionBank)
+                : isAdminPage('question-bank');
             try {
                 state.libraries = await api('/libraries');
                 if (!state.libraries.length) {
@@ -3404,15 +3447,29 @@ D. My parents object to my going out alone at night.
                     renderImportLibrarySelect('import-single-library');
                     refreshExportModalState('__all__');
                     renderDashboardStats();
-                    await loadQuestionBank();
+                    if (shouldLoadQuestionBank) {
+                        await loadQuestionBank();
+                    }
                     return;
                 }
 
-                const currentId = preferredLibraryId || (state.currentLibrary && state.currentLibrary.id) || state.libraries[0].id;
                 renderLibraryList();
-                await selectLibrary(currentId);
-                renderDashboardStats();
-                await loadQuestionBank();
+                if (shouldLoadDetails) {
+                    const currentId = preferredLibraryId || (state.currentLibrary && state.currentLibrary.id) || state.libraries[0].id;
+                    await selectLibrary(currentId);
+                } else {
+                    const targetId = preferredLibraryId || (state.currentLibrary && state.currentLibrary.id) || state.libraries[0].id;
+                    const fallbackLibrary = state.libraries.find((lib) => lib.id === targetId) || state.libraries[0] || null;
+                    state.currentLibrary = fallbackLibrary;
+                    renderImportLibrarySelect('import-doc-library', fallbackLibrary?.id || '');
+                    renderImportLibrarySelect('import-single-library', fallbackLibrary?.id || '');
+                    refreshExportModalState(fallbackLibrary?.id || '__all__');
+                    renderEditor();
+                    renderDashboardStats();
+                }
+                if (shouldLoadQuestionBank) {
+                    await loadQuestionBank();
+                }
             } catch (error) {
                 notify(error.message, true);
             }
@@ -3725,6 +3782,13 @@ D. My parents object to my going out alone at night.
                 confirmText: '开始导入'
             });
             if (!confirmed) return;
+            const submitBtn = $('import-json-submit-btn');
+            const originalText = submitBtn ? submitBtn.innerText : '';
+            if (submitBtn && submitBtn.disabled) return;
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerText = '导入中...';
+            }
 
             const formData = new FormData();
             if (state.importJsonPayload) {
@@ -3747,7 +3811,8 @@ D. My parents object to my going out alone at night.
             try {
                 const result = await api('/import-json', {
                     method: 'POST',
-                    body: formData
+                    body: formData,
+                    timeoutMs: 180000
                 });
                 const replacedText = result.replaced_count ? `，覆盖 ${result.replaced_count} 个题集` : '';
                 notify(`导入成功：${result.library_count} 个题集，${result.question_count} 道题${replacedText}`);
@@ -3759,6 +3824,11 @@ D. My parents object to my going out alone at night.
                 await loadLibraries(firstLibraryId);
             } catch (error) {
                 notify(error.message, true);
+            } finally {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = originalText || '导入题库';
+                }
             }
         }
 
@@ -3814,14 +3884,20 @@ D. My parents object to my going out alone at night.
                 confirmText: '开始导入'
             });
             if (!ok) return;
+            const submitBtn = $('import-doc-submit-btn');
+            const originalText = submitBtn ? submitBtn.innerText : '';
+            if (submitBtn && submitBtn.disabled) return;
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerText = '导入中...';
+            }
 
-            let importedCount = 0;
             try {
-                for (const question of readyQuestions) {
-                    await api(`/libraries/${encodeURIComponent(libraryId)}/questions`, {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            library_id: libraryId,
+                const result = await api(`/libraries/${encodeURIComponent(libraryId)}/questions/batch`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        allow_empty_answer: false,
+                        questions: readyQuestions.map((question) => ({
                             question: question.question,
                             type: question.type,
                             options: question.options,
@@ -3829,15 +3905,21 @@ D. My parents object to my going out alone at night.
                             analysis: question.analysis,
                             difficulty: question.difficulty,
                             chapter: question.chapter
-                        })
-                    });
-                    importedCount += 1;
-                }
+                        }))
+                    }),
+                    timeoutMs: 180000
+                });
+                const importedCount = toIntegerOrDefault(result.imported_count, readyQuestions.length);
                 notify(`文档导入成功：${importedCount} 道题`);
                 closeImportModal();
                 await loadLibraries(libraryId);
             } catch (error) {
-                notify(`已导入 ${importedCount} 道题，失败原因：${error.message}`, true);
+                notify(`文档导入失败：${error.message}`, true);
+            } finally {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = originalText || '导入解析结果';
+                }
             }
         }
 
@@ -4340,6 +4422,13 @@ D. My parents object to my going out alone at night.
                 notify('题集名称不能为空', true);
                 return;
             }
+            const submitBtn = $('create-lib-submit-btn');
+            const originalText = submitBtn ? submitBtn.innerText : '';
+            if (submitBtn && submitBtn.disabled) return;
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.innerText = '创建中...';
+            }
             try {
                 const created = await api('/libraries', {
                     method: 'POST',
@@ -4350,6 +4439,11 @@ D. My parents object to my going out alone at night.
                 await loadLibraries(created.id);
             } catch (error) {
                 notify(error.message, true);
+            } finally {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = originalText || '创建';
+                }
             }
         });
 

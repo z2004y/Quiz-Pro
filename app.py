@@ -56,6 +56,23 @@ def parse_bool_env(value, default=False):
         return False
     return bool(default)
 
+def parse_db_bool(value, default=False):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return int(value) != 0
+    text = str(value).strip().lower()
+    if text in {'1', 'true', 'yes', 'on', 'y'}:
+        return True
+    if text in {'0', 'false', 'no', 'off', 'n', '', 'null', 'none'}:
+        return False
+    try:
+        return int(float(text)) != 0
+    except (TypeError, ValueError):
+        return bool(default)
+
 def parse_int_env(value, default=0):
     try:
         return int(value)
@@ -1127,7 +1144,7 @@ def get_library_with_questions(conn, lib_id):
         'title': library['title'],
         'icon': library['icon'],
         'description': library['description'] if 'description' in library.keys() else '',
-        'is_public': bool(library['is_public']) if 'is_public' in library.keys() else True,
+        'is_public': parse_db_bool(library['is_public'], True) if 'is_public' in library.keys() else True,
         'questions': questions
     }
 
@@ -1708,7 +1725,6 @@ def get_libraries():
         SELECT l.id, l.title, l.icon, l.description, l.is_public, COUNT(q.id) AS question_count
         FROM libraries l
         LEFT JOIN questions q ON q.library_id = l.id
-        WHERE l.is_public = 1
         GROUP BY l.id, l.title, l.icon, l.description, l.is_public
         ORDER BY l.id
     ''')
@@ -1717,12 +1733,15 @@ def get_libraries():
     
     result = []
     for lib in libraries:
+        is_public = parse_db_bool(lib['is_public'], True) if 'is_public' in lib.keys() else True
+        if not is_public:
+            continue
         result.append({
             'id': lib['id'],
             'title': lib['title'],
             'icon': lib['icon'],
             'description': lib['description'] if 'description' in lib.keys() else '',
-            'is_public': bool(lib['is_public']) if 'is_public' in lib.keys() else True,
+            'is_public': is_public,
             'question_count': int(lib['question_count']) if 'question_count' in lib.keys() else 0
         })
 
@@ -1878,7 +1897,7 @@ def admin_get_libraries():
         'title': row['title'],
         'icon': row['icon'],
         'description': row['description'] if 'description' in row.keys() else '',
-        'is_public': bool(row['is_public']) if 'is_public' in row.keys() else True,
+        'is_public': parse_db_bool(row['is_public'], True) if 'is_public' in row.keys() else True,
         'question_count': row['question_count']
     } for row in rows])
 
@@ -1922,7 +1941,7 @@ def admin_create_library():
         'title': created['title'],
         'icon': created['icon'],
         'description': created['description'] if 'description' in created.keys() else '',
-        'is_public': bool(created['is_public']) if 'is_public' in created.keys() else True,
+        'is_public': parse_db_bool(created['is_public'], True) if 'is_public' in created.keys() else True,
         'question_count': 0
     }), 201
 
@@ -2107,6 +2126,61 @@ def admin_create_question(lib_id):
     conn.close()
 
     return jsonify(question), 201
+
+# 管理后台：批量新增题目
+@app.route('/api/admin/libraries/<lib_id>/questions/batch', methods=['POST'])
+@require_admin_auth
+def admin_create_questions_batch(lib_id):
+    data = request.get_json(silent=True) or {}
+    raw_questions = data.get('questions')
+    if not isinstance(raw_questions, list) or not raw_questions:
+        return jsonify({'error': 'questions 必须是非空数组'}), 400
+
+    allow_empty_answer = parse_bool_env(data.get('allow_empty_answer'), False)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (lib_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'Library not found'}), 404
+
+    rows = []
+    try:
+        for idx, item in enumerate(raw_questions, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f'第 {idx} 题格式错误，必须是对象')
+            try:
+                parsed = parse_question_payload(item, allow_empty_answer=allow_empty_answer)
+            except ValueError as exc:
+                raise ValueError(f'第 {idx} 题: {exc}')
+            rows.append((
+                parsed['question'], parsed['type'], parsed['options'], parsed['answer'],
+                parsed['analysis'], parsed['difficulty'], parsed['chapter'], lib_id
+            ))
+
+        cursor.executemany('''
+            INSERT INTO questions (
+                question, type, options, answer, analysis,
+                difficulty, chapter, library_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', rows)
+        conn.commit()
+        invalidate_public_library_cache(lib_id)
+    except ValueError as exc:
+        conn.rollback()
+        conn.close()
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        return jsonify({'error': f'批量导入失败: {exc}'}), 500
+
+    conn.close()
+    return jsonify({
+        'message': '批量导入成功',
+        'library_id': lib_id,
+        'imported_count': len(rows)
+    }), 201
 
 # 管理后台：更新题目
 @app.route('/api/admin/questions/<int:question_id>', methods=['PUT'])
@@ -2379,6 +2453,7 @@ def admin_import_libraries_from_json():
             reserved_ids.add(target_library_id)
             imported_library_ids.append(target_library_id)
 
+            question_rows = []
             for question_index, raw_question in enumerate(questions, start=1):
                 if not isinstance(raw_question, dict):
                     raise ValueError(f'题集「{title}」第 {question_index} 题格式错误，必须是对象')
@@ -2390,17 +2465,20 @@ def admin_import_libraries_from_json():
                 except ValueError as exc:
                     raise ValueError(f'题集「{title}」第 {question_index} 题: {exc}')
 
-                cursor.execute('''
-                    INSERT INTO questions (
-                        question, type, options, answer, analysis,
-                        difficulty, chapter, library_id, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (
+                question_rows.append((
                     parsed_question['question'], parsed_question['type'], parsed_question['options'],
                     parsed_question['answer'], parsed_question['analysis'],
                     parsed_question['difficulty'], parsed_question['chapter'], target_library_id
                 ))
-                imported_question_count += 1
+
+            if question_rows:
+                cursor.executemany('''
+                    INSERT INTO questions (
+                        question, type, options, answer, analysis,
+                        difficulty, chapter, library_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', question_rows)
+                imported_question_count += len(question_rows)
 
         conn.commit()
         invalidate_public_library_cache()
@@ -2483,7 +2561,7 @@ def admin_export_libraries_as_json():
             'title': lib['title'],
             'icon': lib['icon'],
             'description': lib['description'] if 'description' in lib.keys() else '',
-            'is_public': bool(lib['is_public']) if 'is_public' in lib.keys() else True,
+            'is_public': parse_db_bool(lib['is_public'], True) if 'is_public' in lib.keys() else True,
             'questions': questions
         })
 
