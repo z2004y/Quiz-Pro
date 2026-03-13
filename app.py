@@ -402,9 +402,57 @@ def ensure_schema(conn):
         return
 
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='libraries'")
-    if not cursor.fetchone():
-        return
+    # SQLite 首次启动自动建表（避免空数据库直接 500）
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS libraries (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            icon TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            is_public INTEGER NOT NULL DEFAULT 1
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'single',
+            options TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            analysis TEXT NOT NULL,
+            difficulty INTEGER NOT NULL DEFAULT 1,
+            chapter TEXT NOT NULL DEFAULT '',
+            library_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (library_id) REFERENCES libraries (id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_answers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            library_id TEXT NOT NULL,
+            question_id INTEGER NOT NULL,
+            user_answer TEXT,
+            is_correct INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (library_id) REFERENCES libraries (id),
+            FOREIGN KEY (question_id) REFERENCES questions (id)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS collector_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_filename TEXT NOT NULL DEFAULT '',
+            source_size INTEGER NOT NULL DEFAULT 0,
+            library_title TEXT NOT NULL DEFAULT '',
+            library_id TEXT NOT NULL DEFAULT '',
+            library_count INTEGER NOT NULL DEFAULT 0,
+            question_count INTEGER NOT NULL DEFAULT 0,
+            payload TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
 
     cursor.execute("PRAGMA table_info(libraries)")
     columns = {row[1] for row in cursor.fetchall()}
@@ -414,10 +462,6 @@ def ensure_schema(conn):
     if 'is_public' not in columns:
         cursor.execute("ALTER TABLE libraries ADD COLUMN is_public INTEGER NOT NULL DEFAULT 1")
         conn.commit()
-
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='questions'")
-    if not cursor.fetchone():
-        return
 
     def get_question_columns():
         cursor.execute("PRAGMA table_info(questions)")
@@ -506,24 +550,9 @@ def ensure_schema(conn):
     # 索引优化（SQLite）
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_questions_library_id ON questions(library_id)")
 
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_answers'")
-    if cursor.fetchone():
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_answers_library_id ON user_answers(library_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_answers_question_id ON user_answers(question_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_answers_created_at ON user_answers(created_at)")
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS collector_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_filename TEXT NOT NULL DEFAULT '',
-            source_size INTEGER NOT NULL DEFAULT 0,
-            library_title TEXT NOT NULL DEFAULT '',
-            library_id TEXT NOT NULL DEFAULT '',
-            library_count INTEGER NOT NULL DEFAULT 0,
-            question_count INTEGER NOT NULL DEFAULT 0,
-            payload TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_answers_library_id ON user_answers(library_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_answers_question_id ON user_answers(question_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_answers_created_at ON user_answers(created_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_collector_records_created_at ON collector_records(created_at)")
     conn.commit()
 
