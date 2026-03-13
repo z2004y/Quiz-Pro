@@ -142,6 +142,64 @@ docker compose up -d --build
 
 ---
 
+## 宝塔面板部署（Docker 方案）
+
+推荐方式：**宝塔负责 Nginx/SSL，Docker 只跑 `app + db + redis`**。
+
+### 1) 拉取代码
+
+```bash
+cd /www/wwwroot
+git clone https://github.com/z2004y/Quiz-Pro.git
+cd Quiz-Pro
+cp .env.docker.example .env
+```
+
+编辑 `.env` 并至少修改：
+
+- `FLASK_SECRET_KEY`
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
+- `MYSQL_ROOT_PASSWORD`
+- `MYSQL_PASSWORD`
+
+### 2) 启动容器（不启用 compose 内置 nginx）
+
+```bash
+docker compose up -d --build db redis app
+```
+
+> 说明：若同时启动 compose 里的 `nginx`，会和宝塔 Nginx 争抢 80 端口。
+
+### 3) 宝塔站点反代到应用容器
+
+在宝塔面板：
+
+1. 新建站点（你的域名）
+2. 站点设置 -> 反向代理 -> 添加代理
+3. 目标 URL 填写：`http://127.0.0.1:5000`
+4. 保存并启用
+
+### 4) 开启 HTTPS
+
+在宝塔站点里申请 SSL（Let's Encrypt），并开启“强制 HTTPS”。
+
+### 5) 验证
+
+- 前台：`https://你的域名/`
+- 后台：`https://你的域名/admin/login`
+
+### 6) 常用命令
+
+```bash
+docker compose ps
+docker compose logs -f app
+docker compose restart app
+docker compose down
+```
+
+---
+
 ## 数据库配置
 
 通过环境变量切换数据库：
