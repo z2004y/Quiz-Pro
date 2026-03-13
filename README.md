@@ -163,12 +163,14 @@ Redis 不可用时会自动回退到数据库直查。
 
 ## Vercel 部署
 
-### 1) 准备
+支持两种方式：**Git 自动部署（推荐）** 和 **CLI 手动部署**。
+
+### 1) 部署前准备
 
 - 保留根目录 `requirements.txt`、`vercel.json`
-- 入口为 `app.py`（已适配 `@vercel/python`）
+- 入口文件为 `app.py`（已适配 `@vercel/python`）
 
-### 2) 推荐环境变量（Vercel Project Settings → Environment Variables）
+### 2) 环境变量（Vercel Project Settings → Environment Variables）
 
 必填：
 
@@ -191,21 +193,25 @@ Redis 不可用时会自动回退到数据库直查。
 - `COLLECTOR_PUSH`
 - `COLLECTOR_PUSH_TOKEN`
 
-### 3) 一键部署
+### 3) 方式 A：Git 自动部署（推荐）
+
+1. 将项目推送到 GitHub / GitLab / Bitbucket
+2. 打开 Vercel 控制台并点击 **New Project**
+3. 导入仓库后确认配置并部署
+4. 后续 push 代码会自动触发部署（Preview / Production）
+
+### 4) 方式 B：CLI 手动部署
 
 ```bash
+npm i -g vercel
+vercel login
 vercel
-```
-
-首次按提示选择项目；生产发布：
-
-```bash
 vercel --prod
 ```
 
-### 4) 说明
+### 5) 说明
 
-- 如果你用 SQLite，Vercel 仅临时可写目录 `/tmp`，实例重建后数据会丢失（不建议生产）。
+- 如果使用 SQLite，Vercel 仅提供临时可写目录 `/tmp`，实例重建后数据会丢失（不建议生产）。
 - 本项目在 Vercel 下默认：
   - SQLite 路径：`/tmp/quiz.db`
   - AI 设置路径：`/tmp/ai_settings.json`

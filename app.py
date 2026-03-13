@@ -75,7 +75,7 @@ REDIS_PORT = parse_int_env(os.environ.get('REDIS_PORT'), 6379)
 REDIS_DB = parse_int_env(os.environ.get('REDIS_DB'), 0)
 REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD')
 REDIS_CACHE_PREFIX = (os.environ.get('REDIS_CACHE_PREFIX') or 'quiz').strip() or 'quiz'
-REDIS_PUBLIC_LIB_CACHE_TTL = max(10, parse_int_env(os.environ.get('REDIS_PUBLIC_LIB_CACHE_TTL'), 120))
+REDIS_PUBLIC_LIB_CACHE_TTL = max(10, parse_int_env(os.environ.get('REDIS_PUBLIC_LIB_CACHE_TTL'), 600))
 
 REDIS_CLIENT = None
 REDIS_INIT_ATTEMPTED = False
@@ -174,12 +174,15 @@ def get_db_connection():
         db_dir = os.path.dirname(DB_PATH)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=2)
         conn.row_factory = sqlite3.Row
         # SQLite 性能与一致性设置
         try:
             conn.execute('PRAGMA foreign_keys=ON')
-            conn.execute('PRAGMA journal_mode=WAL')
+            conn.execute('PRAGMA synchronous=NORMAL')
+            # Serverless 场景下 WAL 往往收益有限，且可能带来额外文件 IO
+            if not IS_VERCEL:
+                conn.execute('PRAGMA journal_mode=WAL')
         except sqlite3.OperationalError:
             pass
 
@@ -195,6 +198,13 @@ def build_redis_cache_key(*parts):
         if text:
             normalized.append(text)
     return ':'.join(normalized)
+
+def apply_public_cache_headers(response, max_age=0, s_maxage=300, stale_while_revalidate=600):
+    response.headers['Cache-Control'] = (
+        f'public, max-age={max_age}, s-maxage={max(0, int(s_maxage))}, '
+        f'stale-while-revalidate={max(0, int(stale_while_revalidate))}'
+    )
+    return response
 
 def local_cache_get(key):
     now = time.time()
@@ -1637,7 +1647,11 @@ def get_libraries():
     cache_key = build_redis_cache_key('public', 'libraries', 'list')
     cached = redis_get_json(cache_key)
     if isinstance(cached, list):
-        return jsonify(cached)
+        return apply_public_cache_headers(
+            jsonify(cached),
+            s_maxage=min(600, REDIS_PUBLIC_LIB_CACHE_TTL),
+            stale_while_revalidate=max(600, REDIS_PUBLIC_LIB_CACHE_TTL * 3)
+        )
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -1664,7 +1678,11 @@ def get_libraries():
         })
 
     redis_set_json(cache_key, result, REDIS_PUBLIC_LIB_CACHE_TTL)
-    return jsonify(result)
+    return apply_public_cache_headers(
+        jsonify(result),
+        s_maxage=min(600, REDIS_PUBLIC_LIB_CACHE_TTL),
+        stale_while_revalidate=max(600, REDIS_PUBLIC_LIB_CACHE_TTL * 3)
+    )
 
 # 获取题库详情（包含题目和选项）
 @app.route('/api/libraries/<lib_id>', methods=['GET'])
@@ -1675,7 +1693,11 @@ def get_library_details(lib_id):
     if not admin_auth:
         cached = redis_get_json(cache_key)
         if isinstance(cached, dict):
-            return jsonify(cached)
+            return apply_public_cache_headers(
+                jsonify(cached),
+                s_maxage=min(600, REDIS_PUBLIC_LIB_CACHE_TTL),
+                stale_while_revalidate=max(600, REDIS_PUBLIC_LIB_CACHE_TTL * 3)
+            )
 
     conn = get_db_connection()
     result = get_library_with_questions(conn, lib_id)
@@ -1687,6 +1709,11 @@ def get_library_details(lib_id):
         return jsonify({'error': 'Library not found'}), 404
     if not admin_auth and result.get('is_public', True):
         redis_set_json(cache_key, result, REDIS_PUBLIC_LIB_CACHE_TTL)
+        return apply_public_cache_headers(
+            jsonify(result),
+            s_maxage=min(600, REDIS_PUBLIC_LIB_CACHE_TTL),
+            stale_while_revalidate=max(600, REDIS_PUBLIC_LIB_CACHE_TTL * 3)
+        )
     return jsonify(result)
 
 # 保存用户答题记录
