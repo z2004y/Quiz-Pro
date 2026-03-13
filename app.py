@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from functools import wraps
 import time
+import threading
 from urllib import request as urlrequest
 from urllib import error as urlerror
 
@@ -63,7 +64,11 @@ def parse_int_env(value, default=0):
 
 COLLECTOR_PUSH_DEFAULT_ENABLED = parse_bool_env(os.environ.get('COLLECTOR_PUSH'), True)
 COLLECTOR_PUSH_DEFAULT_TOKEN = (os.environ.get('COLLECTOR_PUSH_TOKEN') or '').strip()
-REDIS_ENABLED = parse_bool_env(os.environ.get('REDIS_ENABLED'), True)
+_REDIS_ENABLED_ENV = os.environ.get('REDIS_ENABLED')
+if _REDIS_ENABLED_ENV is None:
+    REDIS_ENABLED = bool(os.environ.get('REDIS_URL'))
+else:
+    REDIS_ENABLED = parse_bool_env(_REDIS_ENABLED_ENV, False)
 REDIS_URL = (os.environ.get('REDIS_URL') or '').strip()
 REDIS_HOST = (os.environ.get('REDIS_HOST') or '127.0.0.1').strip() or '127.0.0.1'
 REDIS_PORT = parse_int_env(os.environ.get('REDIS_PORT'), 6379)
@@ -75,6 +80,8 @@ REDIS_PUBLIC_LIB_CACHE_TTL = max(10, parse_int_env(os.environ.get('REDIS_PUBLIC_
 REDIS_CLIENT = None
 REDIS_INIT_ATTEMPTED = False
 SCHEMA_INITIALIZED = False
+LOCAL_CACHE = {}
+LOCAL_CACHE_LOCK = threading.Lock()
 DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
 if pymysql is not None:
     DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError, pymysql.err.IntegrityError)
@@ -177,6 +184,36 @@ def build_redis_cache_key(*parts):
             normalized.append(text)
     return ':'.join(normalized)
 
+def local_cache_get(key):
+    now = time.time()
+    with LOCAL_CACHE_LOCK:
+        cached = LOCAL_CACHE.get(key)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at and expires_at < now:
+            LOCAL_CACHE.pop(key, None)
+            return None
+        return payload
+
+def local_cache_set(key, payload, ttl_seconds=REDIS_PUBLIC_LIB_CACHE_TTL):
+    try:
+        ttl = max(1, int(ttl_seconds))
+    except (TypeError, ValueError):
+        ttl = REDIS_PUBLIC_LIB_CACHE_TTL
+    with LOCAL_CACHE_LOCK:
+        LOCAL_CACHE[key] = (time.time() + ttl, payload)
+
+def local_cache_delete(key):
+    with LOCAL_CACHE_LOCK:
+        LOCAL_CACHE.pop(key, None)
+
+def local_cache_delete_prefix(prefix):
+    with LOCAL_CACHE_LOCK:
+        keys = [item_key for item_key in LOCAL_CACHE.keys() if item_key.startswith(prefix)]
+        for item_key in keys:
+            LOCAL_CACHE.pop(item_key, None)
+
 def get_redis_client():
     global REDIS_CLIENT, REDIS_INIT_ATTEMPTED
     if REDIS_INIT_ATTEMPTED:
@@ -192,8 +229,8 @@ def get_redis_client():
             client = redis_lib.Redis.from_url(
                 REDIS_URL,
                 decode_responses=True,
-                socket_connect_timeout=1,
-                socket_timeout=1
+                socket_connect_timeout=0.2,
+                socket_timeout=0.2
             )
         else:
             client = redis_lib.Redis(
@@ -202,8 +239,8 @@ def get_redis_client():
                 db=REDIS_DB,
                 password=REDIS_PASSWORD,
                 decode_responses=True,
-                socket_connect_timeout=1,
-                socket_timeout=1
+                socket_connect_timeout=0.2,
+                socket_timeout=0.2
             )
         client.ping()
         REDIS_CLIENT = client
@@ -214,16 +251,19 @@ def get_redis_client():
 def redis_get_json(key):
     client = get_redis_client()
     if not client:
-        return None
+        return local_cache_get(key)
     try:
         raw = client.get(key)
         if not raw:
-            return None
-        return json.loads(raw)
+            return local_cache_get(key)
+        payload = json.loads(raw)
+        local_cache_set(key, payload, REDIS_PUBLIC_LIB_CACHE_TTL)
+        return payload
     except Exception:
-        return None
+        return local_cache_get(key)
 
 def redis_set_json(key, payload, ttl_seconds=REDIS_PUBLIC_LIB_CACHE_TTL):
+    local_cache_set(key, payload, ttl_seconds)
     client = get_redis_client()
     if not client:
         return
@@ -234,11 +274,17 @@ def redis_set_json(key, payload, ttl_seconds=REDIS_PUBLIC_LIB_CACHE_TTL):
         pass
 
 def invalidate_public_library_cache(library_id=None):
+    list_key = build_redis_cache_key('public', 'libraries', 'list')
+    local_cache_delete(list_key)
+    if library_id:
+        local_cache_delete(build_redis_cache_key('public', 'libraries', 'detail', library_id))
+    else:
+        local_cache_delete_prefix(build_redis_cache_key('public', 'libraries', 'detail', ''))
+
     client = get_redis_client()
     if not client:
         return
 
-    list_key = build_redis_cache_key('public', 'libraries', 'list')
     try:
         client.delete(list_key)
     except Exception:
@@ -651,13 +697,16 @@ def build_ai_collect_prompt(source_text, library_title=None, library_id=None):
         '  { "question": "", "type": "single|multiple|judge|fill|qa", "options": [], "answer": "", "analysis": "", "difficulty": 1, "chapter": "" }\n'
         '] } ] }\n'
         '规则：\n'
-        '1) 单选/多选题 options 至少 2 个，answer 用选项字母（如 A 或 A,C 或 ["A","C"]）。\n'
-        '2) 判断题 answer 用“正确/错误”。\n'
-        '3) 填空题 answer 使用“答案1|答案2”。\n'
-        '4) 问答题 answer 可以为空字符串，但尽量给出。\n'
-        f'5) 题集 title 固定为：{title}\n'
-        f'6) 题集 id 若提供则写入：{lib_id}\n'
-        '7) 无法识别的题型默认 single。\n'
+        '1) 每道题都必须包含并补全这 8 个字段：question/type/options/answer/analysis/difficulty/chapter。\n'
+        '2) 单选题 answer 用选项字母（如 A）；多选题 answer 用逗号分隔字母（如 A,C）；options 至少 2 个。\n'
+        '3) 判断题 options 固定为 ["正确","错误"]，answer 只能是“正确”或“错误”。\n'
+        '4) 填空题 answer 使用“答案1|答案2”，数量需与题目括号空位一致。\n'
+        '5) 问答题 options 为空数组，answer 需给出简短参考答案（不要留空）。\n'
+        '6) analysis 不要留空；若无法提炼，写“暂无解析”。\n'
+        '7) chapter 不要留空；若无法判断，写“综合”。difficulty 为 1-5 的整数。\n'
+        f'8) 题集 title 固定为：{title}\n'
+        f'9) 题集 id 若提供则写入：{lib_id}\n'
+        '10) 无法识别的题型默认 single。\n'
         '\n'
         '题目内容如下：\n'
         f'{source_text}\n'
@@ -2272,19 +2321,39 @@ def admin_import_libraries_from_json():
 @app.route('/api/admin/export-json', methods=['GET'])
 @require_admin_auth
 def admin_export_libraries_as_json():
-    target_library_id = (request.args.get('library_id') or '').strip()
+    selected_library_ids = [str(item or '').strip() for item in request.args.getlist('library_id') if str(item or '').strip()]
+    raw_library_ids = str(request.args.get('library_ids') or '').strip()
+    if raw_library_ids:
+        selected_library_ids.extend([
+            part.strip()
+            for part in re.split(r'[,\s]+', raw_library_ids)
+            if part.strip()
+        ])
+    dedup_library_ids = []
+    for lib_id in selected_library_ids:
+        if lib_id == '__all__':
+            dedup_library_ids = []
+            break
+        if lib_id not in dedup_library_ids:
+            dedup_library_ids.append(lib_id)
+    selected_library_ids = dedup_library_ids
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    if target_library_id:
-        cursor.execute('SELECT * FROM libraries WHERE id = ?', (target_library_id,))
+    if selected_library_ids:
+        placeholders = ','.join('?' for _ in selected_library_ids)
+        cursor.execute(f'SELECT * FROM libraries WHERE id IN ({placeholders})', selected_library_ids)
+        rows = cursor.fetchall()
+        row_map = {row['id']: row for row in rows}
+        missing_ids = [lib_id for lib_id in selected_library_ids if lib_id not in row_map]
+        if missing_ids:
+            conn.close()
+            return jsonify({'error': f'题集不存在: {",".join(missing_ids)}'}), 404
+        libraries = [row_map[lib_id] for lib_id in selected_library_ids]
     else:
         cursor.execute('SELECT * FROM libraries ORDER BY id')
-    libraries = cursor.fetchall()
-
-    if target_library_id and not libraries:
-        conn.close()
-        return jsonify({'error': f'题集不存在: {target_library_id}'}), 404
+        libraries = cursor.fetchall()
 
     export_libraries = []
     question_count = 0
@@ -2310,7 +2379,12 @@ def admin_export_libraries_as_json():
         'libraries': export_libraries
     }
 
-    filename_scope = target_library_id if target_library_id else 'all'
+    if not selected_library_ids:
+        filename_scope = 'all'
+    elif len(selected_library_ids) == 1:
+        filename_scope = selected_library_ids[0]
+    else:
+        filename_scope = f'selected-{len(selected_library_ids)}'
     filename = f'quiz-export-{filename_scope}.json'
     content = json.dumps(payload, ensure_ascii=False, indent=2)
     return Response(
@@ -2505,19 +2579,29 @@ def admin_ai_generate_batch():
 @require_admin_auth
 def admin_ai_collect_from_file():
     uploaded_file = request.files.get('file')
-    if not uploaded_file or not uploaded_file.filename:
-        return jsonify({'error': '请上传题目文件'}), 400
+    source_filename = ''
+    raw_content = b''
+    source_text = ''
 
-    raw_content = uploaded_file.read()
-    if not raw_content:
-        return jsonify({'error': '上传文件为空'}), 400
-    if len(raw_content) > 400_000:
-        return jsonify({'error': '文件过大，请控制在 400KB 以内'}), 400
-
-    try:
-        source_text = raw_content.decode('utf-8-sig')
-    except UnicodeDecodeError:
-        return jsonify({'error': '文件编码不支持，请使用 UTF-8'}), 400
+    if uploaded_file and uploaded_file.filename:
+        raw_content = uploaded_file.read()
+        if not raw_content:
+            return jsonify({'error': '上传文件为空'}), 400
+        if len(raw_content) > 400_000:
+            return jsonify({'error': '文件过大，请控制在 400KB 以内'}), 400
+        try:
+            source_text = raw_content.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            return jsonify({'error': '文件编码不支持，请使用 UTF-8'}), 400
+        source_filename = uploaded_file.filename or 'upload.txt'
+    else:
+        source_text = str(request.form.get('source_text') or '')
+        if not source_text.strip():
+            return jsonify({'error': '请上传题目文件或粘贴题目文本'}), 400
+        raw_content = source_text.encode('utf-8')
+        if len(raw_content) > 400_000:
+            return jsonify({'error': '文本过大，请控制在 400KB 以内'}), 400
+        source_filename = 'pasted-text.txt'
 
     settings = sanitize_ai_settings({}, load_ai_settings())
     if not settings.get('api_key'):
@@ -2549,7 +2633,6 @@ def admin_ai_collect_from_file():
 
     question_count = count_questions_in_libraries(libraries)
 
-    source_filename = uploaded_file.filename or ''
     record_id = save_collector_record(
         source_filename=source_filename,
         source_size=len(raw_content),

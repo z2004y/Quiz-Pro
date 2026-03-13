@@ -335,9 +335,10 @@
         }
         #library-list .library-compact-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
             gap: 0.55rem;
             width: 100%;
+            justify-content: start;
         }
         #library-list .library-compact-btn {
             min-height: 2.35rem;
@@ -350,7 +351,6 @@
             justify-content: center;
             gap: 0.35rem;
             width: 100%;
-            min-width: 0;
         }
         #library-list .library-compact-btn:hover {
             border-color: #818cf8;
@@ -1182,6 +1182,25 @@
             background: rgba(148, 163, 184, 0.12);
             border-radius: 0.5rem;
         }
+        .collector-record-action-btn {
+            border: 1px solid #e2e8f0;
+            background: #f8fafc;
+            color: #334155;
+            transition: all 0.2s ease;
+        }
+        .collector-record-action-btn:hover {
+            background: #f1f5f9;
+        }
+        .collector-record-delete-btn {
+            border-color: #fecdd3;
+            background: #fff1f2;
+            color: #e11d48;
+        }
+        .collector-record-delete-btn:hover {
+            border-color: #fda4af;
+            background: #ffe4e6;
+            color: #be123c;
+        }
         body.theme-dark .collector-question-card,
         body.theme-dark .collector-lib-card {
             background: rgba(15, 23, 42, 0.94) !important;
@@ -1195,6 +1214,25 @@
             background: rgba(15, 23, 42, 0.95) !important;
             border-color: rgba(71, 85, 105, 0.85) !important;
             color: #e2e8f0 !important;
+        }
+        body.theme-dark .collector-record-action-btn {
+            background: rgba(30, 41, 59, 0.95) !important;
+            border-color: rgba(71, 85, 105, 0.8) !important;
+            color: #e2e8f0 !important;
+        }
+        body.theme-dark .collector-record-action-btn:hover {
+            background: rgba(51, 65, 85, 0.98) !important;
+            color: #f8fafc !important;
+        }
+        body.theme-dark .collector-record-delete-btn {
+            background: rgba(127, 29, 29, 0.34) !important;
+            border-color: rgba(244, 63, 94, 0.5) !important;
+            color: #fecaca !important;
+        }
+        body.theme-dark .collector-record-delete-btn:hover {
+            background: rgba(159, 18, 57, 0.45) !important;
+            border-color: rgba(251, 113, 133, 0.65) !important;
+            color: #ffe4e6 !important;
         }
 
         .import-edit-card textarea,

@@ -149,10 +149,20 @@
         .quiz-library-card {
             padding: 1.1rem;
             border-radius: 1.25rem;
+            min-width: 0;
+            overflow: hidden;
         }
         .quiz-library-icon {
             font-size: 2rem;
             line-height: 1;
+        }
+        .quiz-library-title,
+        .quiz-library-meta {
+            display: block;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         @media (min-width: 640px) {
             .library-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }

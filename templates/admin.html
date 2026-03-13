@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智选题库 - 管理后台</title>
+    <title>管理后台</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="/static/css/admin.css">
 </head>
@@ -29,13 +29,6 @@
             </div>
 
             <div class="admin-menu-footer">
-                <a href="/" class="admin-menu-btn bg-slate-100 text-slate-700 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300" title="返回做题页" aria-label="返回做题页">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M10 5 3 12l7 7"></path>
-                        <path d="M4 12h17"></path>
-                    </svg>
-                    <span>返回做题页</span>
-                </a>
                 <button id="settings-btn" class="admin-menu-btn bg-slate-100 text-slate-700 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300" title="AI 设置" aria-label="AI 设置">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M12 2v2"></path>
@@ -94,6 +87,13 @@
                         </svg>
                         <span class="sr-only">切换主题</span>
                     </button>
+                    <a href="/" class="toolbar-icon-btn bg-slate-100 text-slate-700 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300" title="返回主页" aria-label="返回主页">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M10 5 3 12l7 7"></path>
+                            <path d="M4 12h17"></path>
+                        </svg>
+                        <span class="sr-only">返回主页</span>
+                    </a>
                 </div>
             </header>
 
@@ -169,7 +169,14 @@
                                 <h2 class="font-bold text-slate-800">采集列表</h2>
                                 <p class="text-sm text-slate-500 mt-1">展示题库采集/导入历史记录（含 AI 与 JSON 导入），便于回溯来源和规模。</p>
                             </div>
-                            <button id="collector-list-refresh-btn" type="button" class="px-3 py-2 rounded-lg bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800">刷新列表</button>
+                            <label class="w-full md:w-80 text-sm">
+                                <span class="sr-only">搜索采集列表</span>
+                                <input
+                                    id="collector-list-search-input"
+                                    class="w-full px-3 py-2 rounded-lg border bg-white"
+                                    placeholder="搜索题目 / 选项 / 答案 / 题型"
+                                >
+                            </label>
                         </div>
                         <div id="collector-list-root" class="text-sm text-slate-500">正在加载采集记录...</div>
                     </section>
@@ -362,7 +369,7 @@
                                             <p>1. 单选题答案可填 A/B/C 或 0/1/2。</p>
                                             <p>2. 多选题答案支持 <code>A,C</code> 或 <code>0,2</code>。</p>
                                             <p>3. 判断题建议选项为“正确 / 错误”，答案可填 A 或 B。</p>
-                                            <p>4. 填空题请在题目中使用括号()标记空位，答案用 <code>|</code> 分隔。</p>
+                                            <p>4. 填空题请在题目中使用括号（）标记空位，答案用 <code>|</code> 分隔。</p>
                                             <p>5. 问答题无需选项，答案支持整段文本。</p>
                                         </div>
                                     </section>
@@ -377,7 +384,7 @@
                                 <div class="flex flex-col md:flex-row md:items-center gap-3 mb-4">
                                     <div class="md:mr-auto">
                                         <h4 class="text-base font-bold text-slate-800">识别导入</h4>
-                                        <p class="text-sm text-slate-500 mt-1">上传题目文件，通过 AI 识别转换为题库 JSON，确认后可直接导入。</p>
+                                        <p class="text-sm text-slate-500 mt-1">上传题目文件或直接粘贴文本，通过 AI 识别转换为题库 JSON，确认后可直接导入。</p>
                                     </div>
                                 </div>
                                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -386,6 +393,10 @@
                                         <input id="collector-file-input" type="file" accept=".txt,.md,text/plain,text/markdown" class="hidden">
                                         <button id="collector-pick-btn" type="button" class="px-3 py-2 rounded-lg bg-slate-900 text-white text-sm font-semibold">选择题目文件</button>
                                         <div id="collector-file-name" class="text-xs text-slate-400 mt-2">未选择文件</div>
+                                        <label class="block text-sm mt-3">
+                                            <span class="text-slate-500">或直接粘贴题目文本</span>
+                                            <textarea id="collector-source-text" class="w-full mt-1 px-3 py-2 rounded-lg border bg-white min-h-[120px]" placeholder="可直接粘贴题目内容（支持题号、选项、答案、解析等）"></textarea>
+                                        </label>
                                         <label class="block text-sm mt-4">
                                             <span class="text-slate-500">题集名称</span>
                                             <input id="collector-library-title" class="w-full mt-1 px-3 py-2 rounded-lg border bg-white" placeholder="如：AI 采集题库">
@@ -403,11 +414,11 @@
                                             <span class="text-slate-500">导入全部题目（允许答案为空）</span>
                                         </label>
                                         <button id="collector-run-btn" type="button" class="mt-4 w-full px-3 py-2.5 rounded-lg bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700">开始识别</button>
-                                        <p class="text-xs text-slate-400 mt-3">支持 .txt/.md 纯文本文件，建议 UTF-8 编码。</p>
+                                        <p class="text-xs text-slate-400 mt-3">支持 .txt/.md 纯文本文件，或直接粘贴文本；建议 UTF-8 编码。</p>
                                     </section>
                                     <section class="border rounded-xl p-4 bg-slate-50 lg:col-span-2">
                                         <h5 class="text-sm font-bold mb-3">检查区</h5>
-                                        <div id="collector-preview" class="import-preview text-sm text-slate-500">请上传题目文件后识别</div>
+                                        <div id="collector-preview" class="import-preview text-sm text-slate-500">请上传题目文件或粘贴文本后识别</div>
                                         <div class="flex flex-wrap gap-3 items-center justify-end mt-4">
                                             <button id="collector-reset-btn" type="button" class="px-3 py-2 rounded-lg bg-slate-100 text-slate-600 text-sm font-semibold">清空</button>
                                             <button id="collector-import-btn" type="button" class="px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold disabled:opacity-60" disabled>导入题库</button>
@@ -427,7 +438,7 @@
                             <div class="flex items-start justify-between gap-4 mb-4">
                                 <div>
                                     <h3 class="text-lg sm:text-xl font-black">导出题库</h3>
-                                    <p class="text-sm text-slate-500 mt-1">支持 JSON 导出和文档导出，可选择单个题集或全部题集</p>
+                                    <p class="text-sm text-slate-500 mt-1">支持 JSON 导出和文档导出，可多选题集导出</p>
                                 </div>
                             </div>
 
@@ -443,8 +454,9 @@
                                         <div class="space-y-3">
                                             <label class="block text-sm">
                                                 <span class="text-slate-500">导出题集</span>
-                                                <select id="export-json-library" class="w-full mt-1 px-3 py-2 rounded-lg border"></select>
+                                                <select id="export-json-library" class="w-full mt-1 px-3 py-2 rounded-lg border" multiple size="10"></select>
                                             </label>
+                                            <p class="text-xs text-slate-400">可按住 Ctrl / Shift 多选，或选择“全部题集”。</p>
                                             <p class="text-xs text-slate-400 leading-relaxed">
                                                 JSON 导出适合备份、迁移和再次导入。选择“全部题集”将导出当前数据库中的全部内容。
                                             </p>
@@ -468,8 +480,9 @@
                                         <div class="space-y-3">
                                             <label class="block text-sm">
                                                 <span class="text-slate-500">导出题集</span>
-                                                <select id="export-txt-library" class="w-full mt-1 px-3 py-2 rounded-lg border"></select>
+                                                <select id="export-txt-library" class="w-full mt-1 px-3 py-2 rounded-lg border" multiple size="10"></select>
                                             </label>
+                                            <p class="text-xs text-slate-400">可按住 Ctrl / Shift 多选，或选择“全部题集”。</p>
                                             <div class="text-sm">
                                                 <div class="flex items-center justify-between gap-2 mb-1.5">
                                                     <span class="text-slate-500">导出字段</span>

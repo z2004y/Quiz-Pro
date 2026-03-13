@@ -9,6 +9,10 @@
         const ANALYSIS_ACTION_ICON = '<span class="inline-block align-[-1px] text-sm leading-none">✍️</span>';
         const ANALYSIS_ACTION_BUTTON_CLASS = 'px-4 py-2 rounded-xl bg-indigo-50 text-indigo-600 text-sm font-bold border border-indigo-300';
         const COMPACTNESS_LABELS = ['舒展', '标准', '紧凑', '极限'];
+        const LIBRARIES_CACHE_KEY = 'quiz_libraries_cache_v1';
+        const LIBRARY_DETAIL_CACHE_PREFIX = 'quiz_library_detail_cache_v1:';
+        const LIBRARIES_CACHE_TTL_MS = 60 * 1000;
+        const LIBRARY_DETAIL_CACHE_TTL_MS = 5 * 60 * 1000;
         let toastTimer = null;
         const $ = id => document.getElementById(id);
         const escapeHtml = (value) => String(value ?? '')
@@ -21,6 +25,31 @@
         function buildApiUrl(endpoint) {
             const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
             return `${API_BASE_URL}${normalizedEndpoint}`;
+        }
+
+        function readSessionCache(key, ttlMs) {
+            try {
+                const raw = sessionStorage.getItem(key);
+                if (!raw) return null;
+                const parsed = JSON.parse(raw);
+                if (!parsed || typeof parsed !== 'object') return null;
+                const ts = Number(parsed.ts || 0);
+                if (!Number.isFinite(ts) || (Date.now() - ts) > ttlMs) {
+                    sessionStorage.removeItem(key);
+                    return null;
+                }
+                return parsed.data;
+            } catch (error) {
+                return null;
+            }
+        }
+
+        function writeSessionCache(key, data) {
+            try {
+                sessionStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
+            } catch (error) {
+                // ignore cache write errors
+            }
         }
 
         function syncViewportHeight() {
@@ -341,9 +370,9 @@
                 analysisAnswer: 'font-black text-indigo-600 mb-2',
                 analysisText: 'leading-relaxed text-slate-600 font-medium',
                 cardsWrap: 'space-y-4',
-                footer: 'flex justify-between items-center gap-3 mt-8 pt-6 border-t pb-safe',
-                prevButton: 'font-bold text-slate-400 hover:text-slate-900 disabled:opacity-0 py-2 px-4 transition-all',
-                nextButton: 'px-9 py-3 bg-slate-900 text-white rounded-2xl font-bold shadow-xl active:scale-95 transition-transform'
+                footer: 'flex justify-between items-center gap-3 mt-8 pt-6 pb-safe',
+                prevButton: 'px-9 py-3 bg-slate-900 text-white rounded-2xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed',
+                nextButton: 'px-9 py-3 bg-slate-900 text-white rounded-2xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed'
             },
             {
                 optionsWrap: 'space-y-2.5',
@@ -359,9 +388,9 @@
                 analysisAnswer: 'font-black text-indigo-600 mb-2',
                 analysisText: 'leading-relaxed text-slate-600 font-medium',
                 cardsWrap: 'space-y-3',
-                footer: 'flex justify-between items-center gap-3 mt-6 pt-5 border-t pb-safe',
-                prevButton: 'font-bold text-slate-400 hover:text-slate-900 disabled:opacity-0 py-2 px-4 transition-all text-sm',
-                nextButton: 'px-8 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform text-sm'
+                footer: 'flex justify-between items-center gap-3 mt-6 pt-5 pb-safe',
+                prevButton: 'px-8 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform text-sm disabled:opacity-40 disabled:cursor-not-allowed',
+                nextButton: 'px-8 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform text-sm disabled:opacity-40 disabled:cursor-not-allowed'
             },
             {
                 optionsWrap: 'space-y-2',
@@ -377,9 +406,9 @@
                 analysisAnswer: 'font-black text-indigo-600 mb-1.5',
                 analysisText: 'leading-snug text-slate-600 font-medium',
                 cardsWrap: 'space-y-2.5',
-                footer: 'flex justify-between items-center gap-2.5 mt-5 pt-4 border-t pb-safe',
-                prevButton: 'font-bold text-slate-400 hover:text-slate-900 disabled:opacity-0 py-1.5 px-3 transition-all',
-                nextButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform'
+                footer: 'flex justify-between items-center gap-2.5 mt-5 pt-4 pb-safe',
+                prevButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed',
+                nextButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed'
             },
             {
                 optionsWrap: 'space-y-1.5',
@@ -395,9 +424,9 @@
                 analysisAnswer: 'font-black text-indigo-600 mb-1.5',
                 analysisText: 'leading-snug text-slate-600 font-medium',
                 cardsWrap: 'space-y-2',
-                footer: 'flex justify-between items-center gap-2 mt-4 pt-4 border-t pb-safe',
-                prevButton: 'font-bold text-slate-400 hover:text-slate-900 disabled:opacity-0 py-1.5 px-3 transition-all',
-                nextButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform'
+                footer: 'flex justify-between items-center gap-2 mt-4 pt-4 pb-safe',
+                prevButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed',
+                nextButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed'
             }
         ];
 
@@ -546,11 +575,18 @@
             const receivedText = received.map((item) => String(item ?? '').trim() || '___').join(' | ');
             const detailText = perBlank
                 .map((item) => {
-                    if (item.status === '正确') return `第${item.index}空正确`;
-                    return `第${item.index}空${item.status} ${item.received} -> ${item.expected}`;
+                    if (item.status === '正确') return `第${item.index}空：正确`;
+                    if (item.status === '少填') return `第${item.index}空：未填写（应填：${item.expected}）`;
+                    return `第${item.index}空：填写“${item.received}”，应为“${item.expected}”`;
                 })
                 .join('；');
-            return { status, receivedText, detailText };
+            return {
+                status,
+                receivedText,
+                detailText,
+                blankCount,
+                showPerBlankDetail: blankCount > 1
+            };
         }
 
         function getFillBlankCount(question) {
@@ -856,6 +892,25 @@
             });
         }
 
+        function renderLibrarySelection(libraries) {
+            $('main-view').innerHTML = `
+                <div class="animate__animated animate__fadeIn">
+                    <h2 class="text-3xl font-black mb-6 text-slate-800 text-center">试卷选择</h2>
+                    <div class="library-grid">
+                        ${libraries.map((l) => {
+                            const title = escapeHtml(l?.title || '未命名题集');
+                            const icon = escapeHtml(l?.icon || '📚');
+                            const questionCount = Number.isFinite(Number(l?.question_count)) ? Number(l.question_count) : 0;
+                            return `<div onclick="selectLib('${l.id}')" class="quiz-library-card border-2 border-transparent hover:border-indigo-400 cursor-pointer group">
+                                <div class="quiz-library-icon mb-3 group-hover:rotate-12 transition-transform">${icon}</div>
+                                <h3 class="quiz-library-title text-base sm:text-lg font-bold leading-snug" title="${title}">${title}</h3>
+                                <p class="quiz-library-meta library-meta text-slate-400 text-xs sm:text-sm mt-1.5" title="${questionCount} 题 · 专业解析">${questionCount} 题 · 专业解析</p>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                </div>`;
+        }
+
         async function showLibrary(options = {}) {
             const skipHistorySync = !!options.skipHistorySync;
             state.lib = null; state.mode = ''; state.idx = 0; state.answers = {}; state.pendingAnswers = {}; state.wrongAttempts = {}; state.isReview = false; state.practiceHints = {}; state.submitting = false;
@@ -868,17 +923,25 @@
             $('exam-timer').classList.add('hidden');
             $('overlay').classList.remove('active');
             if (!skipHistorySync) syncUrlWithState({ libraryId: '', mode: '' });
-            
-            // 显示加载状态
+
+            const cachedLibraries = readSessionCache(LIBRARIES_CACHE_KEY, LIBRARIES_CACHE_TTL_MS);
+            if (Array.isArray(cachedLibraries) && cachedLibraries.length > 0) {
+                renderLibrarySelection(cachedLibraries);
+                fetchFromAPI('/libraries').then((freshLibraries) => {
+                    if (!Array.isArray(freshLibraries) || freshLibraries.length === 0) return;
+                    writeSessionCache(LIBRARIES_CACHE_KEY, freshLibraries);
+                    renderLibrarySelection(freshLibraries);
+                });
+                return;
+            }
+
             $('main-view').innerHTML = `
                 <div class="animate__animated animate__fadeIn flex flex-col items-center justify-center py-20">
                     <div class="w-16 h-16 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-6"></div>
                     <h3 class="text-xl font-bold text-slate-600">加载题库中...</h3>
                 </div>`;
-            
-            // 从API获取题库列表
+
             const libraries = await fetchFromAPI('/libraries');
-            
             if (!Array.isArray(libraries) || libraries.length === 0) {
                 $('main-view').innerHTML = `
                     <div class="animate__animated animate__fadeIn text-center py-20">
@@ -888,34 +951,28 @@
                     </div>`;
                 return;
             }
-            
-            // 生成题库列表
-            $('main-view').innerHTML = `
-                <div class="animate__animated animate__fadeIn">
-                    <h2 class="text-3xl font-black mb-6 text-slate-800 text-center">试卷选择</h2>
-                    <div class="library-grid">
-                        ${libraries.map(l => `<div onclick="selectLib('${l.id}')" class="quiz-library-card border-2 border-transparent hover:border-indigo-400 cursor-pointer group">
-                            <div class="quiz-library-icon mb-3 group-hover:rotate-12 transition-transform">${l.icon}</div>
-                            <h3 class="text-base sm:text-lg font-bold leading-snug">${l.title}</h3>
-                            <p class="library-meta text-slate-400 text-xs sm:text-sm mt-1.5">${Number.isFinite(Number(l.question_count)) ? Number(l.question_count) : 0} 题 · 专业解析</p>
-                        </div>`).join('')}
-                    </div>
-                </div>`;
+            writeSessionCache(LIBRARIES_CACHE_KEY, libraries);
+            renderLibrarySelection(libraries);
         }
 
         async function selectLib(id, options = {}) {
             const routeMode = normalizeRouteMode(options.routeMode);
             const skipHistorySync = !!options.skipHistorySync;
-            // 显示加载状态
-            $('main-view').innerHTML = `
-                <div class="animate__animated animate__fadeIn flex flex-col items-center justify-center py-20">
-                    <div class="w-16 h-16 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-6"></div>
-                    <h3 class="text-xl font-bold text-slate-600">加载题库详情中...</h3>
-                </div>`;
-            
-            // 从API获取题库详情
-            const libraryDetails = await fetchFromAPI(`/libraries/${id}`);
-            
+            const detailCacheKey = `${LIBRARY_DETAIL_CACHE_PREFIX}${id}`;
+            let libraryDetails = readSessionCache(detailCacheKey, LIBRARY_DETAIL_CACHE_TTL_MS);
+
+            if (!libraryDetails || !Array.isArray(libraryDetails.questions)) {
+                $('main-view').innerHTML = `
+                    <div class="animate__animated animate__fadeIn flex flex-col items-center justify-center py-20">
+                        <div class="w-16 h-16 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-6"></div>
+                        <h3 class="text-xl font-bold text-slate-600">加载题库详情中...</h3>
+                    </div>`;
+                libraryDetails = await fetchFromAPI(`/libraries/${id}`);
+                if (libraryDetails && Array.isArray(libraryDetails.questions)) {
+                    writeSessionCache(detailCacheKey, libraryDetails);
+                }
+            }
+
             if (!libraryDetails || !Array.isArray(libraryDetails.questions)) {
                 showNotice('获取题库详情失败，请稍后重试');
                 showLibrary();
@@ -1166,7 +1223,7 @@
 
                 if (showA) {
                     cardHtml += `<div class="${compact.analysisCard}"${getQuestionScaleStyle()}>
-                        ${(qType === 'fill' && fillFeedback) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(fillFeedback.receivedText)} · ${fillFeedback.status}</p><p class="${compact.analysisText}">分空判断：${escapeHtml(fillFeedback.detailText)}</p>` : ''}
+                        ${(qType === 'fill' && fillFeedback) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(fillFeedback.receivedText)} · ${fillFeedback.status}</p>${fillFeedback.showPerBlankDetail ? `<p class="${compact.analysisText}">分空判断：${escapeHtml(fillFeedback.detailText)}</p>` : ''}` : ''}
                         ${(qType === 'qa') ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(String(uAns ?? pendingAnswer ?? '未作答'))}</p>` : ''}
                         ${(qType === 'multiple' && multiFeedback && (uAns !== undefined || state.isReview)) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(multiFeedback.receivedText)} · ${multiFeedback.status === 'correct' ? '正确' : multiFeedback.status}</p>` : ''}
                         <p class="${compact.analysisAnswer}">正确答案：${answerText}</p>
@@ -1329,7 +1386,7 @@
 
             if (showA) {
                 html += `<div class="${compact.analysisCard}"${getQuestionScaleStyle()}>
-                    ${(qType === 'fill' && fillFeedback) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(fillFeedback.receivedText)} · ${fillFeedback.status}</p><p class="${compact.analysisText}">分空判断：${escapeHtml(fillFeedback.detailText)}</p>` : ''}
+                    ${(qType === 'fill' && fillFeedback) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(fillFeedback.receivedText)} · ${fillFeedback.status}</p>${fillFeedback.showPerBlankDetail ? `<p class="${compact.analysisText}">分空判断：${escapeHtml(fillFeedback.detailText)}</p>` : ''}` : ''}
                     ${(qType === 'qa') ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(String(uAns ?? pendingAnswer ?? '未作答'))}</p>` : ''}
                     ${(qType === 'multiple' && multiFeedback && (uAns !== undefined || state.isReview)) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(multiFeedback.receivedText)} · ${multiFeedback.status === 'correct' ? '正确' : multiFeedback.status}</p>` : ''}
                     <p class="${compact.analysisAnswer}">正确答案：${answerText}</p>

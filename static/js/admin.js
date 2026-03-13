@@ -75,12 +75,14 @@ D. My parents object to my going out alone at night.
                 api_key_mask: ''
             },
             collectorFile: null,
+            collectorSourceText: '',
             collectorFilename: '',
             collectorPayload: null,
             collectorPreview: null,
             collectorRecords: [],
             collectorRecordsLoading: false,
             collectorRecordsError: '',
+            collectorRecordsSearch: '',
             previewCollapsed: {
                 importJson: true,
                 importDoc: true,
@@ -231,6 +233,7 @@ D. My parents object to my going out alone at night.
 
         function resetCollectorState() {
             state.collectorFile = null;
+            state.collectorSourceText = '';
             state.collectorFilename = '';
             state.collectorPayload = null;
             state.collectorPreview = null;
@@ -238,7 +241,8 @@ D. My parents object to my going out alone at night.
             state.previewExpanded.collector = {};
             if ($('collector-file-input')) $('collector-file-input').value = '';
             if ($('collector-file-name')) $('collector-file-name').innerText = '未选择文件';
-            if ($('collector-preview')) $('collector-preview').innerText = '请上传题目文件后识别';
+            if ($('collector-source-text')) $('collector-source-text').value = '';
+            if ($('collector-preview')) $('collector-preview').innerText = '请上传题目文件或粘贴文本后识别';
             if ($('collector-replace')) $('collector-replace').checked = false;
             if ($('collector-allow-empty-answer')) $('collector-allow-empty-answer').checked = true;
             if ($('collector-import-btn')) $('collector-import-btn').disabled = true;
@@ -255,6 +259,20 @@ D. My parents object to my going out alone at night.
         function renderCollectorRecordList() {
             const root = $('collector-list-root');
             if (!root) return;
+            const allRecords = Array.isArray(state.collectorRecords) ? state.collectorRecords : [];
+            const keyword = String(state.collectorRecordsSearch || '').trim().toLowerCase();
+            const records = keyword
+                ? allRecords.filter((item) => {
+                    const typeText = getQuestionTypeText(item?.type || 'single');
+                    const merged = [
+                        item?.question || '',
+                        item?.options || '',
+                        item?.answer || '',
+                        typeText
+                    ].join('\n').toLowerCase();
+                    return merged.includes(keyword);
+                })
+                : allRecords;
             if (state.collectorRecordsLoading) {
                 root.innerHTML = '<p>采集列表加载中...</p>';
                 return;
@@ -263,12 +281,16 @@ D. My parents object to my going out alone at night.
                 root.innerHTML = `<p class="text-rose-600">${esc(state.collectorRecordsError)}</p>`;
                 return;
             }
-            if (!Array.isArray(state.collectorRecords) || state.collectorRecords.length === 0) {
+            if (!allRecords.length) {
                 root.innerHTML = '<p class="text-slate-400">暂无采集记录</p>';
                 return;
             }
+            if (!records.length) {
+                root.innerHTML = '<p class="text-slate-400">未找到匹配的采集记录</p>';
+                return;
+            }
 
-            const rowsHtml = state.collectorRecords.map((item, index) => `
+            const rowsHtml = records.map((item, index) => `
                 <tr class="border-b border-slate-100 hover:bg-slate-50/70">
                     <td class="py-2 px-2 whitespace-nowrap">${Number(item.seq || (index + 1))}</td>
                     <td class="py-2 px-2 whitespace-nowrap">${esc(getQuestionTypeText(item.type || 'single'))}</td>
@@ -280,15 +302,15 @@ D. My parents object to my going out alone at night.
                     <td class="py-2 px-2 whitespace-nowrap">${esc(formatEditTime(item.created_at))}</td>
                     <td class="py-2 px-2 whitespace-nowrap">
                         <div class="inline-flex items-center gap-2">
-                            <button class="collector-record-copy-btn text-xs px-2 py-1 rounded bg-slate-100 text-slate-700" data-answer="${esc(item.answer || '')}">复制答案</button>
-                            <button class="collector-record-delete-btn text-xs px-2 py-1 rounded bg-rose-50 text-rose-600" data-record-id="${esc(item.record_id || '')}">删除</button>
+                            <button class="collector-record-copy-btn collector-record-action-btn text-xs px-2 py-1 rounded" data-answer="${esc(item.answer || '')}">复制答案</button>
+                            <button class="collector-record-delete-btn collector-record-action-btn text-xs px-2 py-1 rounded" data-record-id="${esc(item.record_id || '')}">删除</button>
                         </div>
                     </td>
                 </tr>
             `).join('');
 
             root.innerHTML = `
-                <div class="text-xs text-slate-400 mb-2">最近 ${state.collectorRecords.length} 条采集题目</div>
+                <div class="text-xs text-slate-400 mb-2">最近 ${records.length}${keyword ? ` / ${allRecords.length}` : ''} 条采集题目</div>
                 <div class="question-bank-list overflow-auto">
                     <table class="min-w-full text-sm question-grid-table">
                         <thead class="bg-slate-50 text-slate-600">
@@ -393,7 +415,6 @@ D. My parents object to my going out alone at night.
                                     <div class="text-sm font-semibold text-slate-700 truncate">${esc(q.question || `题目 ${qIndex + 1}`)}</div>
                                     <div class="text-xs text-slate-400">${esc(summary)}</div>
                                 </div>
-                                <button type="button" class="collector-ai-btn text-xs font-semibold px-2 py-1 rounded-lg bg-slate-900 text-white" data-collector-lib="${libIndex}" data-collector-question="${qIndex}">AI生成</button>
                                 <button type="button" class="collector-delete-btn text-rose-600 text-xs font-semibold" data-collector-lib="${libIndex}" data-collector-question="${qIndex}">删除</button>
                             </div>
                             ${isExpanded ? `
@@ -470,15 +491,16 @@ D. My parents object to my going out alone at night.
                         <p>共识别 <strong>${totalQuestions}</strong> 道题。</p>
                         ${filename ? `<p class="text-xs text-slate-400 mt-1">来源：${esc(filename)}</p>` : ''}
                     </div>
-                    <button type="button" class="collector-ai-batch px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold">批量AI生成</button>
                 </div>
                 <div class="space-y-4">${libsHtml}</div>
             `;
         }
 
         async function runCollector() {
-            if (!state.collectorFile) {
-                notify('请先选择题目文件', true);
+            const sourceText = String($('collector-source-text')?.value || '');
+            const hasTextSource = sourceText.trim().length > 0;
+            if (!state.collectorFile && !hasTextSource) {
+                notify('请先选择题目文件或粘贴题目文本', true);
                 return;
             }
             if (!state.aiSettings.has_api_key) {
@@ -489,7 +511,11 @@ D. My parents object to my going out alone at night.
             const previewRoot = $('collector-preview');
             if (previewRoot) previewRoot.innerHTML = '<p>AI 正在识别，请稍候...</p>';
             const formData = new FormData();
-            formData.append('file', state.collectorFile);
+            if (state.collectorFile) {
+                formData.append('file', state.collectorFile);
+            } else {
+                formData.append('source_text', sourceText);
+            }
             formData.append('library_title', $('collector-library-title')?.value || '');
             formData.append('library_id', $('collector-library-id')?.value || '');
             try {
@@ -504,7 +530,11 @@ D. My parents object to my going out alone at night.
                 state.collectorPreview = result;
                 state.previewCollapsed.collector = true;
                 state.previewExpanded.collector = {};
-                renderCollectorPreview(result.payload, state.collectorFilename);
+                const sourceLabel = state.collectorFile
+                    ? state.collectorFilename
+                    : `粘贴文本（${sourceText.trim().length} 字）`;
+                state.collectorFilename = sourceLabel;
+                renderCollectorPreview(result.payload, sourceLabel);
                 if ($('collector-import-btn')) $('collector-import-btn').disabled = false;
                 notify(`AI 识别完成：${result.question_count || 0} 道题`);
             } catch (error) {
@@ -2022,56 +2052,110 @@ D. My parents object to my going out alone at night.
             return normalizeExportTxtFields(fields).map((field) => getExportTxtFieldLabel(field));
         }
 
-        function getExportLibrarySummary(libraryValue) {
+        function normalizeExportLibrarySelection(rawSelection) {
+            const list = Array.isArray(rawSelection) ? rawSelection : [rawSelection];
+            const normalized = [];
+            list.forEach((item) => {
+                const value = String(item ?? '').trim();
+                if (!value) return;
+                if (value === '__all__') {
+                    normalized.length = 0;
+                    normalized.push('__all__');
+                    return;
+                }
+                if (!normalized.includes(value)) {
+                    normalized.push(value);
+                }
+            });
+            if (!normalized.length) return ['__all__'];
+            if (normalized.includes('__all__')) return ['__all__'];
+            const valid = normalized.filter((value) => state.libraries.some((lib) => lib.id === value));
+            return valid.length ? valid : ['__all__'];
+        }
+
+        function getSelectedExportLibraryValues(selectId) {
+            const el = $(selectId);
+            if (!el) return ['__all__'];
+            if (el.multiple) {
+                const values = Array.from(el.selectedOptions || []).map((option) => option.value);
+                return normalizeExportLibrarySelection(values);
+            }
+            return normalizeExportLibrarySelection(el.value || '__all__');
+        }
+
+        function getExportLibrarySummary(libraryValues) {
             const allQuestionCount = state.libraries.reduce(
                 (sum, lib) => sum + toIntegerOrDefault(lib.question_count, 0),
                 0
             );
-            if (!libraryValue || libraryValue === '__all__') {
+            const selectedIds = normalizeExportLibrarySelection(libraryValues);
+            if (selectedIds.includes('__all__')) {
                 return {
-                    libraryId: '',
+                    exportAll: true,
+                    libraryIds: [],
                     label: '全部题集',
                     libraryCount: state.libraries.length,
                     questionCount: allQuestionCount
                 };
             }
 
-            const target = state.libraries.find((lib) => lib.id === libraryValue);
-            if (!target) {
+            const selectedLibraries = selectedIds
+                .map((libId) => state.libraries.find((lib) => lib.id === libId))
+                .filter(Boolean);
+            if (!selectedLibraries.length) {
                 return {
-                    libraryId: '',
+                    exportAll: true,
+                    libraryIds: [],
                     label: '全部题集',
                     libraryCount: state.libraries.length,
                     questionCount: allQuestionCount
                 };
             }
+            const questionCount = selectedLibraries.reduce(
+                (sum, lib) => sum + toIntegerOrDefault(lib.question_count, 0),
+                0
+            );
+            const label = selectedLibraries.length === 1
+                ? `题集「${selectedLibraries[0].title}」`
+                : `已选 ${selectedLibraries.length} 个题集`;
             return {
-                libraryId: target.id,
-                label: `题集「${target.title}」`,
-                libraryCount: 1,
-                questionCount: toIntegerOrDefault(target.question_count, 0)
+                exportAll: false,
+                libraryIds: selectedLibraries.map((lib) => lib.id),
+                label,
+                libraryCount: selectedLibraries.length,
+                questionCount
             };
         }
 
-        function renderExportLibrarySelect(selectId, selectedValue) {
+        function renderExportLibrarySelect(selectId, selectedValues) {
             const el = $(selectId);
             if (!el) return;
-            let fallback = selectedValue || el.value || (state.currentLibrary?.id || '__all__');
-            if (fallback !== '__all__' && !state.libraries.some((lib) => lib.id === fallback)) {
-                fallback = '__all__';
-            }
+            const fallbackValues = normalizeExportLibrarySelection(
+                selectedValues
+                || getSelectedExportLibraryValues(selectId)
+                || [state.currentLibrary?.id || '__all__']
+            );
+            const selectedSet = new Set(fallbackValues);
             const rows = [
-                `<option value="__all__" ${fallback === '__all__' ? 'selected' : ''}>全部题集</option>`,
+                `<option value="__all__">全部题集</option>`,
                 ...state.libraries.map((lib) => {
-                    const selected = fallback === lib.id ? 'selected' : '';
-                    return `<option value="${esc(lib.id)}" ${selected}>${esc(lib.icon)} ${esc(lib.title)} (${lib.question_count}题)</option>`;
+                    return `<option value="${esc(lib.id)}">${esc(lib.icon)} ${esc(lib.title)} (${lib.question_count}题)</option>`;
                 })
             ];
             el.innerHTML = rows.join('');
+            Array.from(el.options).forEach((option) => {
+                option.selected = selectedSet.has(option.value);
+            });
+            if (!Array.from(el.selectedOptions).length && el.options.length) {
+                el.options[0].selected = true;
+            }
         }
 
-        function refreshExportModalState(selectedValue) {
-            const fallback = selectedValue || state.currentLibrary?.id || '__all__';
+        function refreshExportModalState(selectedValues) {
+            const fallback = normalizeExportLibrarySelection(
+                selectedValues
+                || [state.currentLibrary?.id || '__all__']
+            );
             renderExportLibrarySelect('export-json-library', fallback);
             renderExportLibrarySelect('export-txt-library', fallback);
             syncExportTxtFieldControls();
@@ -2086,7 +2170,7 @@ D. My parents object to my going out alone at night.
             const previewId = format === 'txt' ? 'export-txt-preview' : 'export-json-preview';
             const root = $(previewId);
             if (!root) return;
-            const summary = getExportLibrarySummary($(selectId)?.value || '__all__');
+            const summary = getExportLibrarySummary(getSelectedExportLibraryValues(selectId));
             const formatLabel = format === 'txt' ? 'TXT 文档' : 'JSON 文件';
             const desc = format === 'txt'
                 ? '纯文本导出，适合阅读和打印。'
@@ -2187,7 +2271,6 @@ D. My parents object to my going out alone at night.
                                     <div class="text-sm font-semibold text-slate-700 truncate">${esc(q.question || `题目 ${qIndex + 1}`)}</div>
                                     <div class="text-xs text-slate-400">${esc(summary)}</div>
                                 </div>
-                                <button type="button" class="import-json-ai-btn text-xs font-semibold px-2 py-1 rounded-lg bg-slate-900 text-white" data-import-json-lib="${libIndex}" data-import-json-question="${qIndex}">AI生成</button>
                                 <button type="button" class="import-json-delete-btn text-rose-600 text-xs font-semibold" data-import-json-lib="${libIndex}" data-import-json-question="${qIndex}">删除</button>
                             </div>
                             ${isExpanded ? `
@@ -2264,7 +2347,6 @@ D. My parents object to my going out alone at night.
                         <p>共检测到 <strong>${payload.libraries.length}</strong> 个题集，<strong>${totalQuestions}</strong> 道题。</p>
                         <p class="text-xs text-slate-400 mt-1">文件：${esc(preview.filename || '')}</p>
                     </div>
-                    <button type="button" class="import-json-ai-batch px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold">批量AI生成</button>
                 </div>
                 <div class="space-y-4">${libsHtml}</div>
             `;
@@ -2623,7 +2705,6 @@ D. My parents object to my going out alone at night.
                                 <div class="text-sm font-semibold text-slate-700 truncate">${esc(q.question || `题目 ${index + 1}`)}</div>
                                 <div class="text-xs text-slate-400">${esc(summary)}</div>
                             </div>
-                            <button type="button" class="import-doc-ai-btn text-xs font-semibold px-2 py-1 rounded-lg bg-slate-900 text-white" data-import-doc-question="${index}">AI生成</button>
                             <button type="button" class="import-doc-delete-btn text-rose-600 text-xs font-semibold" data-import-doc-question="${index}">删除</button>
                         </div>
                         ${isExpanded ? `
@@ -2674,7 +2755,6 @@ D. My parents object to my going out alone at night.
                         <p>共识别 <strong>${state.importDocQuestions.length}</strong> 道题。</p>
                         ${state.importDocLastFilename ? `<p class="text-xs text-slate-400 mt-1">来源：${esc(state.importDocLastFilename)}</p>` : ''}
                     </div>
-                    <button type="button" class="import-doc-ai-batch px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold">批量AI生成</button>
                 </div>
                 <div class="space-y-3">${questionsHtml}</div>
             `;
@@ -2900,8 +2980,8 @@ D. My parents object to my going out alone at night.
             return lines.join('\n').trim();
         }
 
-        async function exportLibraries(format, selectedLibraryValue) {
-            const summary = getExportLibrarySummary(selectedLibraryValue);
+        async function exportLibraries(format, selectedLibraryValues) {
+            const summary = getExportLibrarySummary(selectedLibraryValues);
             if (!summary.libraryCount) {
                 notify('暂无可导出的题集', true);
                 return;
@@ -2919,7 +2999,13 @@ D. My parents object to my going out alone at night.
             });
             if (!ok) return;
 
-            const query = summary.libraryId ? `?library_id=${encodeURIComponent(summary.libraryId)}` : '';
+            const queryParams = new URLSearchParams();
+            if (!summary.exportAll) {
+                summary.libraryIds.forEach((libId) => {
+                    queryParams.append('library_id', libId);
+                });
+            }
+            const query = queryParams.toString() ? `?${queryParams.toString()}` : '';
             const exportUrl = `${API_BASE}/export-json${query}`;
             try {
                 const response = await fetch(exportUrl, { credentials: 'same-origin' });
@@ -2932,7 +3018,11 @@ D. My parents object to my going out alone at night.
                     throw new Error(data.error || '导出失败');
                 }
 
-                const fallbackName = summary.libraryId ? `quiz-export-${summary.libraryId}.json` : 'quiz-export-all.json';
+                const fallbackName = summary.exportAll
+                    ? 'quiz-export-all.json'
+                    : (summary.libraryIds.length === 1
+                        ? `quiz-export-${summary.libraryIds[0]}.json`
+                        : `quiz-export-selected-${summary.libraryIds.length}.json`);
                 const sourceFilename = parseDownloadFilename(
                     response.headers.get('Content-Disposition') || '',
                     fallbackName
@@ -3932,10 +4022,10 @@ D. My parents object to my going out alone at night.
             renderExportPreview('txt');
         });
         $('export-json-submit-btn').addEventListener('click', async () => {
-            await exportLibraries('json', $('export-json-library')?.value || '__all__');
+            await exportLibraries('json', getSelectedExportLibraryValues('export-json-library'));
         });
         $('export-txt-submit-btn').addEventListener('click', async () => {
-            await exportLibraries('txt', $('export-txt-library')?.value || '__all__');
+            await exportLibraries('txt', getSelectedExportLibraryValues('export-txt-library'));
         });
 
         $('refresh-btn').addEventListener('click', async () => {
@@ -3947,9 +4037,9 @@ D. My parents object to my going out alone at night.
             await loadLibraries();
             notify('已刷新');
         });
-        $('collector-list-refresh-btn')?.addEventListener('click', async () => {
-            await loadCollectorRecordList();
-            notify('采集列表已刷新');
+        $('collector-list-search-input')?.addEventListener('input', (event) => {
+            state.collectorRecordsSearch = String(event.target?.value || '').trim();
+            renderCollectorRecordList();
         });
         $('collector-list-root')?.addEventListener('click', async (event) => {
             const copyBtn = event.target.closest('.collector-record-copy-btn');
@@ -4636,9 +4726,33 @@ D. My parents object to my going out alone at night.
                     state.collectorPreview = null;
                     if ($('collector-import-btn')) $('collector-import-btn').disabled = true;
                     if ($('collector-preview')) {
-                        $('collector-preview').innerText = file ? '已选择文件，点击“开始识别”。' : '请上传题目文件后识别';
+                        const hasTextSource = String($('collector-source-text')?.value || '').trim().length > 0;
+                        if (file) {
+                            $('collector-preview').innerText = '已选择文件，点击“开始识别”。';
+                        } else if (hasTextSource) {
+                            $('collector-preview').innerText = '已粘贴文本，点击“开始识别”。';
+                        } else {
+                            $('collector-preview').innerText = '请上传题目文件或粘贴文本后识别';
+                        }
                     }
-                    if (!file) resetCollectorState();
+                });
+            }
+            if ($('collector-source-text')) {
+                $('collector-source-text').addEventListener('input', (event) => {
+                    const sourceText = String(event.target?.value || '');
+                    state.collectorSourceText = sourceText;
+                    state.collectorPayload = null;
+                    state.collectorPreview = null;
+                    if ($('collector-import-btn')) $('collector-import-btn').disabled = true;
+                    if ($('collector-preview')) {
+                        if (sourceText.trim()) {
+                            $('collector-preview').innerText = '已粘贴文本，点击“开始识别”。';
+                        } else if (state.collectorFile) {
+                            $('collector-preview').innerText = '已选择文件，点击“开始识别”。';
+                        } else {
+                            $('collector-preview').innerText = '请上传题目文件或粘贴文本后识别';
+                        }
+                    }
                 });
             }
             if ($('collector-run-btn')) {
@@ -4697,30 +4811,6 @@ D. My parents object to my going out alone at night.
                             state.previewExpanded.collector[key] = !state.previewExpanded.collector[key];
                             renderCollectorPreview(state.collectorPayload, state.collectorFilename);
                         }
-                        return;
-                    }
-                    const batchBtn = event.target.closest('.collector-ai-batch');
-                    if (batchBtn) {
-                        await runBatchAiGenerateCollector(batchBtn);
-                        return;
-                    }
-                    const aiBtn = event.target.closest('.collector-ai-btn');
-                    if (aiBtn && state.collectorPayload) {
-                        const libIndex = Number(aiBtn.getAttribute('data-collector-lib'));
-                        const questionIndex = Number(aiBtn.getAttribute('data-collector-question'));
-                        const lib = state.collectorPayload.libraries[libIndex];
-                        const item = lib?.questions?.[questionIndex];
-                        if (!item) return;
-                        await runAiGenerateForPreviewItem(
-                            { question: item.question, type: item.type, options: item.options },
-                            aiBtn,
-                            (result) => {
-                                if (result.answer) item.answer = result.answer;
-                                if (result.analysis) item.analysis = result.analysis;
-                                if (result.chapter) item.chapter = result.chapter;
-                            }
-                        );
-                        renderCollectorPreview(state.collectorPayload, state.collectorFilename);
                         return;
                     }
                     const btn = event.target.closest('.collector-delete-btn');
@@ -4783,30 +4873,6 @@ D. My parents object to my going out alone at night.
                         }
                         return;
                     }
-                    const batchBtn = event.target.closest('.import-json-ai-batch');
-                    if (batchBtn) {
-                        await runBatchAiGenerateImportJson(batchBtn);
-                        return;
-                    }
-                    const aiBtn = event.target.closest('.import-json-ai-btn');
-                    if (aiBtn && state.importJsonPayload) {
-                        const libIndex = Number(aiBtn.getAttribute('data-import-json-lib'));
-                        const questionIndex = Number(aiBtn.getAttribute('data-import-json-question'));
-                        const lib = state.importJsonPayload.libraries[libIndex];
-                        const item = lib?.questions?.[questionIndex];
-                        if (!item) return;
-                        await runAiGenerateForPreviewItem(
-                            { question: item.question, type: item.type, options: item.options },
-                            aiBtn,
-                            (result) => {
-                                if (result.answer) item.answer = result.answer;
-                                if (result.analysis) item.analysis = result.analysis;
-                                if (result.chapter) item.chapter = result.chapter;
-                            }
-                        );
-                        renderImportJsonPreview();
-                        return;
-                    }
                     const btn = event.target.closest('.import-json-delete-btn');
                     if (!btn || !state.importJsonPayload) return;
                     const libIndex = Number(btn.getAttribute('data-import-json-lib'));
@@ -4856,28 +4922,6 @@ D. My parents object to my going out alone at night.
                             state.previewExpanded.importDoc[key] = !state.previewExpanded.importDoc[key];
                             renderImportDocPreview();
                         }
-                        return;
-                    }
-                    const batchBtn = event.target.closest('.import-doc-ai-batch');
-                    if (batchBtn) {
-                        await runBatchAiGenerateImportDoc(batchBtn);
-                        return;
-                    }
-                    const aiBtn = event.target.closest('.import-doc-ai-btn');
-                    if (aiBtn) {
-                        const questionIndex = Number(aiBtn.getAttribute('data-import-doc-question'));
-                        const item = state.importDocQuestions[questionIndex];
-                        if (!item) return;
-                        await runAiGenerateForPreviewItem(
-                            { question: item.question, type: item.type, options: item.options },
-                            aiBtn,
-                            (result) => {
-                                if (result.answer) item.answer = result.answer;
-                                if (result.analysis) item.analysis = result.analysis;
-                                if (result.chapter) item.chapter = result.chapter;
-                            }
-                        );
-                        renderImportDocPreview();
                         return;
                     }
                     const btn = event.target.closest('.import-doc-delete-btn');
