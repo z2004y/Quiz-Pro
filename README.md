@@ -72,6 +72,76 @@ python app.py
 
 ---
 
+## Docker Compose 部署（推荐自托管）
+
+已内置以下文件：
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `deploy/nginx/default.conf`
+- `.env.docker.example`
+
+### 1) 准备环境变量
+
+```bash
+cp .env.docker.example .env
+```
+
+然后编辑 `.env`，至少修改：
+
+- `FLASK_SECRET_KEY`
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
+- `MYSQL_ROOT_PASSWORD`
+- `MYSQL_PASSWORD`
+
+### 2) 启动
+
+```bash
+docker compose up -d --build
+```
+
+启动后访问：
+
+- `http://<你的服务器IP>/`
+- 后台登录：`http://<你的服务器IP>/admin/login`
+
+### 3) 常用命令
+
+查看状态：
+
+```bash
+docker compose ps
+```
+
+查看日志：
+
+```bash
+docker compose logs -f app
+docker compose logs -f db
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+停止并清空数据卷（危险）：
+
+```bash
+docker compose down -v
+```
+
+### 4) 升级代码后重启
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+---
+
 ## 数据库配置
 
 通过环境变量切换数据库：
