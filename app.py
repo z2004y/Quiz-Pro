@@ -33,14 +33,14 @@ if not DB_BACKEND:
 if DB_BACKEND not in ('sqlite', 'mysql'):
     raise RuntimeError("DB_BACKEND 仅支持 sqlite 或 mysql")
 
-MYSQL_HOST = os.environ.get('MYSQL_HOST', 'mysql3.sqlpub.com')
-MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'z721683736')
-MYSQL_USER = os.environ.get('MYSQL_USER', 'z2004y')
+MYSQL_HOST = (os.environ.get('MYSQL_HOST') or '').strip()
+MYSQL_DATABASE = (os.environ.get('MYSQL_DATABASE') or '').strip()
+MYSQL_USER = (os.environ.get('MYSQL_USER') or '').strip()
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', '')
 try:
-    MYSQL_PORT = int(os.environ.get('MYSQL_PORT', '3308'))
+    MYSQL_PORT = int(os.environ.get('MYSQL_PORT', '3306'))
 except ValueError:
-    MYSQL_PORT = 3308
+    MYSQL_PORT = 3306
 
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-this-secret-key')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
@@ -148,6 +148,15 @@ def get_db_connection():
     if DB_BACKEND == 'mysql':
         if pymysql is None:
             raise RuntimeError('DB_BACKEND=mysql 但未安装 PyMySQL，请先安装依赖')
+        missing = []
+        if not MYSQL_HOST:
+            missing.append('MYSQL_HOST')
+        if not MYSQL_DATABASE:
+            missing.append('MYSQL_DATABASE')
+        if not MYSQL_USER:
+            missing.append('MYSQL_USER')
+        if missing:
+            raise RuntimeError(f'DB_BACKEND=mysql 但缺少环境变量: {", ".join(missing)}')
         conn = MySQLConnectionAdapter(pymysql.connect(
             host=MYSQL_HOST,
             port=MYSQL_PORT,
@@ -156,6 +165,9 @@ def get_db_connection():
             database=MYSQL_DATABASE,
             charset='utf8mb4',
             cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=2,
+            read_timeout=5,
+            write_timeout=5,
             autocommit=False
         ))
     else:
