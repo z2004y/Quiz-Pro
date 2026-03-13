@@ -76,6 +76,9 @@ REDIS_DB = parse_int_env(os.environ.get('REDIS_DB'), 0)
 REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD')
 REDIS_CACHE_PREFIX = (os.environ.get('REDIS_CACHE_PREFIX') or 'quiz').strip() or 'quiz'
 REDIS_PUBLIC_LIB_CACHE_TTL = max(10, parse_int_env(os.environ.get('REDIS_PUBLIC_LIB_CACHE_TTL'), 600))
+MYSQL_POOL_ENABLED = parse_bool_env(os.environ.get('MYSQL_POOL_ENABLED'), IS_VERCEL)
+MYSQL_POOL_MAX_IDLE_SECONDS = max(10, parse_int_env(os.environ.get('MYSQL_POOL_MAX_IDLE_SECONDS'), 45))
+MYSQL_CONN_LOCAL = threading.local()
 
 REDIS_CLIENT = None
 REDIS_INIT_ATTEMPTED = False
@@ -124,8 +127,9 @@ class MySQLCursorAdapter:
         return getattr(self._cursor, item)
 
 class MySQLConnectionAdapter:
-    def __init__(self, conn):
+    def __init__(self, conn, pooled=False):
         self._conn = conn
+        self._pooled = bool(pooled)
 
     def cursor(self, *args, **kwargs):
         return MySQLCursorAdapter(self._conn.cursor(*args, **kwargs))
@@ -137,39 +141,80 @@ class MySQLConnectionAdapter:
         return self._conn.rollback()
 
     def close(self):
+        if self._pooled:
+            # 保留连接以复用，但确保事务不会泄漏到下一次请求
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            return None
         return self._conn.close()
 
     def __getattr__(self, item):
         return getattr(self._conn, item)
 
 # 数据库连接函数
+def _validate_mysql_env():
+    missing = []
+    if not MYSQL_HOST:
+        missing.append('MYSQL_HOST')
+    if not MYSQL_DATABASE:
+        missing.append('MYSQL_DATABASE')
+    if not MYSQL_USER:
+        missing.append('MYSQL_USER')
+    if missing:
+        raise RuntimeError(f'DB_BACKEND=mysql 但缺少环境变量: {", ".join(missing)}')
+
+def _create_mysql_raw_connection():
+    return pymysql.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=2,
+        read_timeout=5,
+        write_timeout=5,
+        autocommit=False
+    )
+
+def _get_mysql_raw_connection():
+    now = time.time()
+    entry = getattr(MYSQL_CONN_LOCAL, 'mysql_entry', None)
+    if entry:
+        raw_conn, last_used = entry
+        if raw_conn is not None:
+            idle_seconds = now - float(last_used or 0)
+            if idle_seconds >= MYSQL_POOL_MAX_IDLE_SECONDS:
+                try:
+                    raw_conn.ping(reconnect=True)
+                except Exception:
+                    try:
+                        raw_conn.close()
+                    except Exception:
+                        pass
+                    raw_conn = None
+            if raw_conn is not None:
+                MYSQL_CONN_LOCAL.mysql_entry = (raw_conn, now)
+                return raw_conn
+
+    raw_conn = _create_mysql_raw_connection()
+    MYSQL_CONN_LOCAL.mysql_entry = (raw_conn, now)
+    return raw_conn
+
+# 数据库连接函数
 def get_db_connection():
-    global SCHEMA_INITIALIZED
+    global SCHEMA_INITIALIZED, REDIS_ENABLED
     if DB_BACKEND == 'mysql':
         if pymysql is None:
             raise RuntimeError('DB_BACKEND=mysql 但未安装 PyMySQL，请先安装依赖')
-        missing = []
-        if not MYSQL_HOST:
-            missing.append('MYSQL_HOST')
-        if not MYSQL_DATABASE:
-            missing.append('MYSQL_DATABASE')
-        if not MYSQL_USER:
-            missing.append('MYSQL_USER')
-        if missing:
-            raise RuntimeError(f'DB_BACKEND=mysql 但缺少环境变量: {", ".join(missing)}')
-        conn = MySQLConnectionAdapter(pymysql.connect(
-            host=MYSQL_HOST,
-            port=MYSQL_PORT,
-            user=MYSQL_USER,
-            password=MYSQL_PASSWORD,
-            database=MYSQL_DATABASE,
-            charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=2,
-            read_timeout=5,
-            write_timeout=5,
-            autocommit=False
-        ))
+        _validate_mysql_env()
+        if MYSQL_POOL_ENABLED:
+            conn = MySQLConnectionAdapter(_get_mysql_raw_connection(), pooled=True)
+        else:
+            conn = MySQLConnectionAdapter(_create_mysql_raw_connection(), pooled=False)
     else:
         db_dir = os.path.dirname(DB_PATH)
         if db_dir:
@@ -185,6 +230,10 @@ def get_db_connection():
                 conn.execute('PRAGMA journal_mode=WAL')
         except sqlite3.OperationalError:
             pass
+
+    if IS_VERCEL and REDIS_ENABLED and not REDIS_URL and REDIS_HOST in {'127.0.0.1', 'localhost'}:
+        # Vercel 无本地 Redis，避免首个请求额外探测超时
+        REDIS_ENABLED = False
 
     if not SCHEMA_INITIALIZED:
         ensure_schema(conn)

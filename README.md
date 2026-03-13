@@ -87,6 +87,8 @@ MySQL 环境变量：
 - `MYSQL_DATABASE`
 - `MYSQL_USER`
 - `MYSQL_PASSWORD`
+- `MYSQL_POOL_ENABLED`（可选，默认在 Vercel 为 true）
+- `MYSQL_POOL_MAX_IDLE_SECONDS`（可选，默认 45）
 
 ---
 
@@ -139,6 +141,10 @@ Redis 不可用时会自动回退到数据库直查。
   - `REDIS_PASSWORD`
 - `REDIS_CACHE_PREFIX`（默认 `quiz`）
 - `REDIS_PUBLIC_LIB_CACHE_TTL`（默认 120 秒）
+
+建议：
+
+- 在 Vercel 未配置外部 Redis 时，设置 `REDIS_ENABLED=false`，避免无效连接探测。
 
 ---
 
