@@ -10,6 +10,7 @@ import time
 import threading
 from urllib import request as urlrequest
 from urllib import error as urlerror
+from urllib.parse import quote
 
 try:
     import pymysql
@@ -41,6 +42,7 @@ if not DB_BACKEND:
     DB_BACKEND = 'mysql' if os.environ.get('MYSQL_HOST') else 'sqlite'
 if DB_BACKEND not in ('sqlite', 'mysql'):
     raise RuntimeError("DB_BACKEND 仅支持 sqlite 或 mysql")
+SQLITE_READ_ONLY = DB_BACKEND == 'sqlite' and IS_VERCEL
 
 MYSQL_HOST = (os.environ.get('MYSQL_HOST') or '').strip()
 MYSQL_DATABASE = (os.environ.get('MYSQL_DATABASE') or '').strip()
@@ -242,10 +244,16 @@ def get_db_connection():
         else:
             conn = MySQLConnectionAdapter(_create_mysql_raw_connection(), pooled=False)
     else:
-        db_dir = os.path.dirname(DB_PATH)
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
-        conn = sqlite3.connect(DB_PATH, timeout=2)
+        if SQLITE_READ_ONLY:
+            if not os.path.exists(DB_PATH):
+                raise RuntimeError(f'SQLite 数据库文件不存在: {DB_PATH}')
+            sqlite_uri = f'file:{quote(DB_PATH)}?mode=ro&immutable=1'
+            conn = sqlite3.connect(sqlite_uri, timeout=2, uri=True)
+        else:
+            db_dir = os.path.dirname(DB_PATH)
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
+            conn = sqlite3.connect(DB_PATH, timeout=2)
         conn.row_factory = sqlite3.Row
         # SQLite 性能与一致性设置
         try:
@@ -262,7 +270,8 @@ def get_db_connection():
         REDIS_ENABLED = False
 
     if not SCHEMA_INITIALIZED:
-        ensure_schema(conn)
+        if not SQLITE_READ_ONLY:
+            ensure_schema(conn)
         SCHEMA_INITIALIZED = True
     return conn
 
