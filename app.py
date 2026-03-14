@@ -2087,27 +2087,50 @@ def admin_update_library(lib_id):
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (lib_id,))
-    if not cursor.fetchone():
+    cursor.execute(
+        'SELECT id, title, icon, description, is_public FROM libraries WHERE id = ?',
+        (lib_id,)
+    )
+    current_library = cursor.fetchone()
+    if not current_library:
         conn.close()
         return jsonify({'error': 'Library not found'}), 404
 
     current_lib_id = lib_id
-    if next_lib_id and next_lib_id != lib_id:
-        cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (next_lib_id,))
-        if cursor.fetchone():
-            conn.close()
-            return jsonify({'error': '题集 ID 已存在，请更换'}), 400
-        cursor.execute('UPDATE libraries SET id = ? WHERE id = ?', (next_lib_id, lib_id))
-        cursor.execute('UPDATE questions SET library_id = ? WHERE library_id = ?', (next_lib_id, lib_id))
-        cursor.execute('UPDATE user_answers SET library_id = ? WHERE library_id = ?', (next_lib_id, lib_id))
-        current_lib_id = next_lib_id
+    try:
+        if next_lib_id and next_lib_id != lib_id:
+            cursor.execute('SELECT 1 FROM libraries WHERE id = ?', (next_lib_id,))
+            if cursor.fetchone():
+                conn.close()
+                return jsonify({'error': '题集 ID 已存在，请更换'}), 400
 
-    if fields:
-        values.append(current_lib_id)
-        cursor.execute(f'UPDATE libraries SET {", ".join(fields)} WHERE id = ?', values)
+            # 通过“新建父记录 -> 迁移子记录 -> 删除旧记录”方式改 ID，
+            # 避免外键约束下直接更新主键导致失败（SQLite/MySQL 均可用）。
+            cursor.execute(
+                'INSERT INTO libraries (id, title, icon, description, is_public) VALUES (?, ?, ?, ?, ?)',
+                (
+                    next_lib_id,
+                    current_library['title'],
+                    current_library['icon'],
+                    current_library['description'] if 'description' in current_library.keys() else '',
+                    current_library['is_public'] if 'is_public' in current_library.keys() else 1
+                )
+            )
+            cursor.execute('UPDATE questions SET library_id = ? WHERE library_id = ?', (next_lib_id, lib_id))
+            cursor.execute('UPDATE user_answers SET library_id = ? WHERE library_id = ?', (next_lib_id, lib_id))
+            cursor.execute('DELETE FROM libraries WHERE id = ?', (lib_id,))
+            current_lib_id = next_lib_id
 
-    conn.commit()
+        if fields:
+            values.append(current_lib_id)
+            cursor.execute(f'UPDATE libraries SET {", ".join(fields)} WHERE id = ?', values)
+
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        return jsonify({'error': f'更新题集失败: {exc}'}), 500
+
     invalidate_public_library_cache()
     result = get_library_with_questions(conn, current_lib_id)
     conn.close()

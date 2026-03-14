@@ -441,6 +441,78 @@
             return ` style="font-size:${scale}em;"`;
         }
 
+        function measureQuestionIndexColumnWidth(sampleIndexEl, maxQuestionIndex) {
+            if (!sampleIndexEl || !document.body) return null;
+            const style = window.getComputedStyle(sampleIndexEl);
+            const text = `${Math.max(1, Number(maxQuestionIndex) || 1)}.`;
+
+            const ruler = document.createElement('span');
+            ruler.innerText = text;
+            ruler.style.position = 'absolute';
+            ruler.style.left = '-9999px';
+            ruler.style.top = '-9999px';
+            ruler.style.visibility = 'hidden';
+            ruler.style.pointerEvents = 'none';
+            ruler.style.whiteSpace = 'nowrap';
+            ruler.style.fontFamily = style.fontFamily;
+            ruler.style.fontSize = style.fontSize;
+            ruler.style.fontWeight = style.fontWeight;
+            ruler.style.fontStyle = style.fontStyle;
+            ruler.style.letterSpacing = style.letterSpacing;
+            ruler.style.lineHeight = style.lineHeight;
+            ruler.style.fontVariantNumeric = style.fontVariantNumeric;
+            ruler.style.fontFeatureSettings = style.fontFeatureSettings;
+            document.body.appendChild(ruler);
+            const width = ruler.getBoundingClientRect().width;
+            ruler.remove();
+
+            if (!Number.isFinite(width) || width <= 0) return null;
+            return Math.ceil(width + 8);
+        }
+
+        function syncQuestionIndexAlignment() {
+            const headers = Array.from(document.querySelectorAll('.question-head-grid'));
+            if (!headers.length) return;
+
+            const alignedHeaders = headers
+                .map((header) => ({
+                    header,
+                    indexEl: header.querySelector('.question-head-index'),
+                    titleEl: header.querySelector('.question-head-title')
+                }))
+                .filter((item) => item.indexEl && item.titleEl);
+            if (!alignedHeaders.length) return;
+
+            const renderedIndexes = alignedHeaders
+                .map((item) => Number.parseInt(String(item.indexEl.textContent || '').replace(/[^\d]/g, ''), 10))
+                .filter(Number.isFinite);
+            const maxRenderedIndex = renderedIndexes.length ? Math.max(...renderedIndexes) : 0;
+            const maxQuestionIndex = Math.max(Number(state.lib?.questions?.length) || 0, maxRenderedIndex, 1);
+            const columnWidth = measureQuestionIndexColumnWidth(alignedHeaders[0].indexEl, maxQuestionIndex);
+
+            alignedHeaders.forEach(({ header, indexEl, titleEl }) => {
+                if (columnWidth) {
+                    header.style.setProperty('--question-head-index-col', `${columnWidth}px`);
+                }
+
+                indexEl.style.removeProperty('height');
+
+                let firstLineHeight = Number.parseFloat(window.getComputedStyle(titleEl).lineHeight);
+                if (!Number.isFinite(firstLineHeight) || firstLineHeight <= 0) {
+                    const fontSize = Number.parseFloat(window.getComputedStyle(titleEl).fontSize);
+                    if (Number.isFinite(fontSize) && fontSize > 0) {
+                        firstLineHeight = fontSize * 1.375;
+                    } else {
+                        firstLineHeight = 0;
+                    }
+                }
+
+                if (firstLineHeight) {
+                    indexEl.style.height = `${firstLineHeight}px`;
+                }
+            });
+        }
+
         function parseChoiceAnswerIndex(answerValue, optionCount = null, questionType = 'single') {
             const token = String(answerValue ?? '').trim().replace(/[。；;]+$/g, '');
             if (!token) return null;
@@ -491,9 +563,9 @@
                 optionCard: 'option-card p-4 flex items-center font-bold leading-normal text-slate-600',
                 optionTag: 'w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center mr-3 font-black text-slate-400 shrink-0',
                 questionCard: 'quiz-panel bg-white/95 rounded-[2.3rem] p-5 md:p-8 shadow-lg border border-slate-200/70',
-                questionHeader: 'flex items-start gap-3 mb-6',
-                questionIndex: 'text-slate-400 font-black leading-none mt-1',
-                questionTitle: 'text-xl md:text-2xl font-bold text-slate-800 leading-snug',
+                questionHeader: 'question-head-grid gap-x-3 mb-6',
+                questionIndex: 'question-head-index text-xl md:text-2xl text-slate-400 font-black leading-snug',
+                questionTitle: 'question-head-title text-xl md:text-2xl font-bold text-slate-800 leading-snug',
                 questionTypeTag: 'inline-flex items-center ml-2 px-2 py-1 rounded-md text-xs font-bold bg-slate-100 text-slate-500 align-middle',
                 hintButton: 'mt-5 w-full py-3 bg-indigo-50 text-indigo-600 rounded-2xl font-bold',
                 analysisCard: 'analysis-card mt-5 p-4 bg-slate-50 rounded-2xl border-l-8 border-indigo-600',
@@ -509,9 +581,9 @@
                 optionCard: 'option-card p-3.5 flex items-center font-bold leading-snug text-slate-600',
                 optionTag: 'w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center mr-3 font-black text-slate-400 shrink-0',
                 questionCard: 'quiz-panel bg-white/95 rounded-[2.1rem] p-4 md:p-7 shadow-lg border border-slate-200/70',
-                questionHeader: 'flex items-start gap-2.5 mb-5',
-                questionIndex: 'text-slate-400 font-black leading-none mt-0.5',
-                questionTitle: 'text-xl md:text-2xl font-bold text-slate-800 leading-snug',
+                questionHeader: 'question-head-grid gap-x-2.5 mb-5',
+                questionIndex: 'question-head-index text-xl md:text-2xl text-slate-400 font-black leading-snug',
+                questionTitle: 'question-head-title text-xl md:text-2xl font-bold text-slate-800 leading-snug',
                 questionTypeTag: 'inline-flex items-center ml-2 px-2 py-0.5 rounded-md text-xs font-bold bg-slate-100 text-slate-500 align-middle',
                 hintButton: 'mt-4 w-full py-3 bg-indigo-50 text-indigo-600 rounded-2xl font-bold',
                 analysisCard: 'analysis-card mt-4 p-4 bg-slate-50 rounded-xl border-l-8 border-indigo-600',
@@ -527,9 +599,9 @@
                 optionCard: 'option-card p-3 flex items-center font-bold leading-snug text-slate-600',
                 optionTag: 'w-7 h-7 rounded-md bg-slate-100 flex items-center justify-center mr-2.5 font-black text-slate-400 shrink-0',
                 questionCard: 'quiz-panel bg-white/95 rounded-[1.8rem] p-3.5 md:p-6 shadow-lg border border-slate-200/70',
-                questionHeader: 'flex items-start gap-2.5 mb-4',
-                questionIndex: 'text-slate-400 font-black leading-none mt-0.5',
-                questionTitle: 'text-lg md:text-xl font-bold text-slate-800 leading-snug',
+                questionHeader: 'question-head-grid gap-x-2.5 mb-4',
+                questionIndex: 'question-head-index text-lg md:text-xl text-slate-400 font-black leading-snug',
+                questionTitle: 'question-head-title text-lg md:text-xl font-bold text-slate-800 leading-snug',
                 questionTypeTag: 'inline-flex items-center ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 align-middle',
                 hintButton: 'mt-3 w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl font-bold',
                 analysisCard: 'analysis-card mt-3 p-3.5 bg-slate-50 rounded-xl border-l-4 border-indigo-600',
@@ -545,9 +617,9 @@
                 optionCard: 'option-card p-2.5 flex items-center font-bold leading-tight text-slate-600',
                 optionTag: 'w-6 h-6 rounded-md bg-slate-100 flex items-center justify-center mr-2 font-black text-slate-400 shrink-0',
                 questionCard: 'quiz-panel bg-white/95 rounded-[1.5rem] p-3 md:p-5 shadow-lg border border-slate-200/70',
-                questionHeader: 'flex items-start gap-2 mb-3',
-                questionIndex: 'text-slate-400 font-black leading-none mt-0.5',
-                questionTitle: 'text-lg md:text-xl font-bold text-slate-800 leading-snug',
+                questionHeader: 'question-head-grid gap-x-2 mb-3',
+                questionIndex: 'question-head-index text-lg md:text-xl text-slate-400 font-black leading-snug',
+                questionTitle: 'question-head-title text-lg md:text-xl font-bold text-slate-800 leading-snug',
                 questionTypeTag: 'inline-flex items-center ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 align-middle',
                 hintButton: 'mt-3 w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl font-bold',
                 analysisCard: 'analysis-card mt-3 p-3 bg-slate-50 rounded-xl border-l-4 border-indigo-600',
@@ -891,6 +963,7 @@
         function toggleQuestionNavMode() {
             const currentQuestionIndex = state.idx;
             state.navMode = isPullNavMode() ? 'next' : 'pull';
+            updateModeSwitchUI();
             state.idx = currentQuestionIndex;
             renderQuestion();
             if (state.navMode === 'pull') {
@@ -1336,6 +1409,7 @@
                 <div class="${wrapClass}">
                     ${cards}
                 </div>`;
+            syncQuestionIndexAlignment();
             updateNavState();
         }
 
@@ -1494,6 +1568,7 @@
                 </div>`;
             
             $('main-view').innerHTML = html;
+            syncQuestionIndexAlignment();
             updateNavState();
         }
 
@@ -1939,12 +2014,19 @@
                 syncViewportHeight();
                 syncDeviceProfileClass();
                 syncSidebarForViewportChange();
+                syncQuestionIndexAlignment();
             });
             window.addEventListener('orientationchange', () => {
                 syncViewportHeight();
                 syncDeviceProfileClass();
                 syncSidebarForViewportChange();
+                syncQuestionIndexAlignment();
             });
+            if (document.fonts && document.fonts.ready) {
+                document.fonts.ready.then(() => {
+                    syncQuestionIndexAlignment();
+                }).catch(() => {});
+            }
             initTopActionsDragScroll();
             updateQuestionFontSizePreview();
             updateCompactnessPreview();

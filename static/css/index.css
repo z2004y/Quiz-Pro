@@ -20,6 +20,25 @@
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
         ::-webkit-scrollbar-track { background: transparent; }
 
+        /* 题号/题干对齐：固定题号列 + 自适应题干列 */
+        .question-head-grid {
+            display: grid;
+            grid-template-columns: var(--question-head-index-col, 3.8ch) minmax(0, 1fr);
+            align-items: start;
+        }
+        .question-head-index {
+            display: flex;
+            width: 100%;
+            justify-content: flex-end;
+            align-items: center;
+            height: 1.375em;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+        .question-head-title {
+            min-width: 0;
+        }
+
         /* --- 响应式布局核心 --- */
         #sidebar { 
             transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); 
