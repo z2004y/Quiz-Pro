@@ -1665,11 +1665,29 @@ D. My parents object to my going out alone at night.
         function formatEditTime(rawTime) {
             const text = String(rawTime || '').trim();
             if (!text) return '--';
-            const normalized = text.includes('T') ? text : text.replace(' ', 'T');
-            const withTimezone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}Z`;
-            const date = new Date(withTimezone);
+            const looksRfc = /GMT|^[A-Za-z]{3},\s*\d{1,2}\s+[A-Za-z]{3}\s+\d{4}/i.test(text);
+            let date = looksRfc ? new Date(text) : new Date(NaN);
+            if (Number.isNaN(date.getTime())) {
+                const normalized = text.includes('T') ? text : text.replace(' ', 'T');
+                const withTimezone = /([zZ]|[+-]\d{2}:?\d{2}|GMT)$/.test(normalized) ? normalized : `${normalized}Z`;
+                date = new Date(withTimezone);
+            }
             if (Number.isNaN(date.getTime())) return text;
-            return date.toLocaleString('zh-CN', { hour12: false });
+            const parts = new Intl.DateTimeFormat('zh-CN', {
+                timeZone: 'Asia/Shanghai',
+                hour12: false,
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit'
+            }).formatToParts(date);
+            const map = {};
+            parts.forEach((part) => {
+                if (part.type !== 'literal') map[part.type] = part.value;
+            });
+            if (!map.year || !map.month || !map.day || !map.hour || !map.minute) return text;
+            return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}`;
         }
 
         function updateQuestionCardTypeUI(card) {

@@ -1757,16 +1757,28 @@ def get_libraries():
     cache_key = build_redis_cache_key('public', 'libraries', 'list')
     cached = redis_get_json(cache_key)
     if isinstance(cached, list):
-        return apply_public_cache_headers(
-            jsonify(cached),
-            s_maxage=min(600, REDIS_PUBLIC_LIB_CACHE_TTL),
-            stale_while_revalidate=max(600, REDIS_PUBLIC_LIB_CACHE_TTL * 3)
+        has_updated_at = all(
+            isinstance(item, dict) and ('updated_at' in item)
+            for item in cached
         )
+        if has_updated_at:
+            return apply_public_cache_headers(
+                jsonify(cached),
+                s_maxage=min(600, REDIS_PUBLIC_LIB_CACHE_TTL),
+                stale_while_revalidate=max(600, REDIS_PUBLIC_LIB_CACHE_TTL * 3)
+            )
 
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT l.id, l.title, l.icon, l.description, l.is_public, COUNT(q.id) AS question_count
+        SELECT
+            l.id,
+            l.title,
+            l.icon,
+            l.description,
+            l.is_public,
+            COUNT(q.id) AS question_count,
+            COALESCE(MAX(q.updated_at), '') AS updated_at
         FROM libraries l
         LEFT JOIN questions q ON q.library_id = l.id
         GROUP BY l.id, l.title, l.icon, l.description, l.is_public
@@ -1786,7 +1798,8 @@ def get_libraries():
             'icon': lib['icon'],
             'description': lib['description'] if 'description' in lib.keys() else '',
             'is_public': is_public,
-            'question_count': int(lib['question_count']) if 'question_count' in lib.keys() else 0
+            'question_count': int(lib['question_count']) if 'question_count' in lib.keys() else 0,
+            'updated_at': lib['updated_at'] if 'updated_at' in lib.keys() else ''
         })
 
     redis_set_json(cache_key, result, REDIS_PUBLIC_LIB_CACHE_TTL)
@@ -1927,7 +1940,14 @@ def admin_get_libraries():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT l.id, l.title, l.icon, l.description, l.is_public, COUNT(q.id) AS question_count
+        SELECT
+            l.id,
+            l.title,
+            l.icon,
+            l.description,
+            l.is_public,
+            COUNT(q.id) AS question_count,
+            COALESCE(MAX(q.updated_at), '') AS updated_at
         FROM libraries l
         LEFT JOIN questions q ON q.library_id = l.id
         GROUP BY l.id, l.title, l.icon, l.description, l.is_public
@@ -1942,7 +1962,8 @@ def admin_get_libraries():
         'icon': row['icon'],
         'description': row['description'] if 'description' in row.keys() else '',
         'is_public': parse_db_bool(row['is_public'], True) if 'is_public' in row.keys() else True,
-        'question_count': row['question_count']
+        'question_count': row['question_count'],
+        'updated_at': row['updated_at'] if 'updated_at' in row.keys() else ''
     } for row in rows])
 
 # 管理后台：新建题集

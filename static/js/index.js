@@ -21,9 +21,129 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
+        function formatDateToBeijing(date) {
+            const parts = new Intl.DateTimeFormat('zh-CN', {
+                timeZone: 'Asia/Shanghai',
+                hour12: false,
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit'
+            }).formatToParts(date);
+            const map = {};
+            parts.forEach((part) => {
+                if (part.type !== 'literal') map[part.type] = part.value;
+            });
+            if (!map.year || !map.month || !map.day || !map.hour || !map.minute) {
+                return '';
+            }
+            return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}`;
+        }
+        function parseApiDateTime(value) {
+            const raw = String(value ?? '').trim();
+            if (!raw) return null;
+
+            const looksRfc = /GMT|^[A-Za-z]{3},\s*\d{1,2}\s+[A-Za-z]{3}\s+\d{4}/i.test(raw);
+            let parsed = looksRfc ? new Date(raw) : new Date(NaN);
+            if (Number.isNaN(parsed.getTime())) {
+                const normalized = raw.replace(/\.\d+$/, '');
+                const withDateTimeSeparator = normalized.includes('T') ? normalized : normalized.replace(' ', 'T');
+                const withTimezone = /([zZ]|[+-]\d{2}:?\d{2}|GMT)$/.test(withDateTimeSeparator)
+                    ? withDateTimeSeparator
+                    : `${withDateTimeSeparator}Z`;
+                parsed = new Date(withTimezone);
+            }
+            if (Number.isNaN(parsed.getTime())) return null;
+            return parsed;
+        }
+        function formatLibraryUpdatedAt(value) {
+            const raw = String(value ?? '').trim();
+            if (!raw) return '暂无';
+            const parsed = parseApiDateTime(raw);
+            if (!parsed) return raw;
+            return formatDateToBeijing(parsed) || raw;
+        }
+        function getLibraryUpdatedAtText(library) {
+            const direct = String(library?.updated_at ?? '').trim();
+            if (direct) return formatLibraryUpdatedAt(direct);
+
+            const questions = Array.isArray(library?.questions) ? library.questions : [];
+            let latest = null;
+            questions.forEach((q) => {
+                const dt = parseApiDateTime(q?.updated_at);
+                if (!dt) return;
+                if (!latest || dt.getTime() > latest.getTime()) latest = dt;
+            });
+            return latest ? (formatDateToBeijing(latest) || '暂无') : '暂无';
+        }
+        function normalizeLibrarySearchKeyword(value) {
+            return String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+        }
+        function applyHomeLibrarySearchFilter(libraries, totalQuestions) {
+            const keyword = normalizeLibrarySearchKeyword(homeLibrarySearchKeyword);
+            const cards = document.querySelectorAll('#home-library-grid .quiz-library-card[data-library-search]');
+            let matchedLibraries = 0;
+            let matchedQuestions = 0;
+
+            cards.forEach((card) => {
+                const searchable = String(card.dataset.librarySearch || '');
+                const questionCount = Number(card.dataset.libraryQuestionCount || 0);
+                const isMatched = !keyword || searchable.includes(keyword);
+                card.classList.toggle('hidden', !isMatched);
+                if (!isMatched) return;
+                matchedLibraries += 1;
+                matchedQuestions += Number.isFinite(questionCount) ? questionCount : 0;
+            });
+
+            const meta = $('library-search-meta');
+            if (meta) {
+                meta.innerText = keyword
+                    ? `已匹配 ${matchedLibraries}/${libraries.length} 个题集，共 ${matchedQuestions} 题`
+                    : `共 ${libraries.length} 个题集，${totalQuestions} 题`;
+            }
+
+            const empty = $('library-search-empty');
+            if (empty) {
+                empty.classList.toggle('hidden', matchedLibraries !== 0);
+            }
+
+            const clearBtn = $('library-search-clear');
+            if (clearBtn) {
+                clearBtn.classList.toggle('hidden', !keyword);
+            }
+        }
+        function bindHomeLibrarySearch(libraries, totalQuestions) {
+            const input = $('library-search-input');
+            if (!input) return;
+            input.value = homeLibrarySearchKeyword;
+
+            const onInput = () => {
+                homeLibrarySearchKeyword = String(input.value || '');
+                applyHomeLibrarySearchFilter(libraries, totalQuestions);
+            };
+
+            input.addEventListener('input', onInput);
+
+            const clearBtn = $('library-search-clear');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', () => {
+                    input.value = '';
+                    onInput();
+                    input.focus();
+                });
+            }
+
+            applyHomeLibrarySearchFilter(libraries, totalQuestions);
+        }
         function buildApiUrl(endpoint) {
             const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
             return `${API_BASE_URL}${normalizedEndpoint}`;
+        }
+        function setMainViewHomeLayout(enabled) {
+            const view = $('main-view');
+            if (!view) return;
+            view.classList.toggle('home-layout', !!enabled);
         }
 
         function readSessionCache(key, ttlMs) {
@@ -276,6 +396,7 @@
         }
 
         let state = { lib: null, mode: '', idx: 0, answers: {}, pendingAnswers: {}, wrongAttempts: {}, timer: null, timeLeft: 600, isReview: false, practiceHints: {}, submitting: false, navMode: 'next', pendingExamModeSwitch: false, questionFontScale: getStoredQuestionFontPercent() / 100, compactnessLevel: getStoredCompactnessLevel() };
+        let homeLibrarySearchKeyword = '';
         let confirmResolver = null;
         const MODE_SWITCHABLE = ['browse', 'practice', 'analysis', 'exam'];
 
@@ -1052,25 +1173,102 @@
         }
 
         function renderLibrarySelection(libraries) {
+            setMainViewHomeLayout(true);
+            const totalLibraries = libraries.length;
+            const totalQuestions = libraries.reduce((sum, item) => {
+                const count = Number.isFinite(Number(item?.question_count)) ? Number(item.question_count) : 0;
+                return sum + count;
+            }, 0);
+            let latestUpdatedDate = null;
+            libraries.forEach((item) => {
+                const dt = parseApiDateTime(item?.updated_at);
+                if (!dt) return;
+                if (!latestUpdatedDate || dt.getTime() > latestUpdatedDate.getTime()) {
+                    latestUpdatedDate = dt;
+                }
+            });
+            const latestUpdatedText = latestUpdatedDate ? formatDateToBeijing(latestUpdatedDate) : '暂无';
+            const escapedSearchKeyword = escapeHtml(homeLibrarySearchKeyword);
+
             $('main-view').innerHTML = `
-                <div class="animate__animated animate__fadeIn">
-                    <h2 class="text-3xl font-black mb-6 text-slate-800 text-center">试卷选择</h2>
-                    <div class="library-grid">
-                        ${libraries.map((l) => {
+                <div class="home-shell animate__animated animate__fadeIn">
+                    <section class="home-hero">
+                        <div class="home-hero-badge">QUIZ PRO · 智能题库</div>
+                        <h2 class="home-hero-title">选择题集，马上进入高效刷题</h2>
+                        <p class="home-hero-subtitle">支持浏览、练习、考试、解析四种模式。</p>
+                        <div class="home-stats">
+                            <div class="home-stat-card">
+                                <span class="home-stat-number">${totalLibraries}</span>
+                                <span class="home-stat-label">题集数量</span>
+                            </div>
+                            <div class="home-stat-card">
+                                <span class="home-stat-number">${totalQuestions}</span>
+                                <span class="home-stat-label">总题量</span>
+                            </div>
+                            <div class="home-stat-card home-stat-card-wide">
+                                <span class="home-stat-number">${latestUpdatedText}</span>
+                                <span class="home-stat-label">最近更新</span>
+                            </div>
+                        </div>
+                        <div class="home-search-wrap">
+                            <div class="home-search-box">
+                                <svg class="home-search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="11" cy="11" r="7"></circle>
+                                    <path d="m20 20-3.5-3.5"></path>
+                                </svg>
+                                <input id="library-search-input" class="home-search-input" type="text" placeholder="搜索题集名称、简介或 ID" value="${escapedSearchKeyword}">
+                                <button id="library-search-clear" type="button" class="home-search-clear hidden" aria-label="清空搜索">清空</button>
+                            </div>
+                            <p id="library-search-meta" class="home-search-meta"></p>
+                        </div>
+                    </section>
+                    <div id="home-library-grid" class="library-grid home-library-grid">
+                        ${libraries.map((l, index) => {
                             const title = escapeHtml(l?.title || '未命名题集');
                             const icon = escapeHtml(l?.icon || '📚');
+                            const safeId = String(l?.id ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+                            const accentClass = `lib-accent-${(index % 6) + 1}`;
                             const questionCount = Number.isFinite(Number(l?.question_count)) ? Number(l.question_count) : 0;
-                            return `<div onclick="selectLib('${l.id}')" class="quiz-library-card border-2 border-transparent hover:border-indigo-400 cursor-pointer group">
-                                <div class="quiz-library-icon mb-3 group-hover:rotate-12 transition-transform">${icon}</div>
-                                <h3 class="quiz-library-title text-base sm:text-lg font-bold leading-snug" title="${title}">${title}</h3>
-                                <p class="quiz-library-meta library-meta text-slate-400 text-xs sm:text-sm mt-1.5" title="${questionCount} 题 · 专业解析">${questionCount} 题 · 专业解析</p>
-                            </div>`;
+                            const updatedAtText = escapeHtml(formatLibraryUpdatedAt(l?.updated_at));
+                            const descriptionRaw = String(l?.description || '').trim() || '系统化练习，覆盖重点与高频考点。';
+                            const description = escapeHtml(descriptionRaw);
+                            const searchIndex = escapeHtml(normalizeLibrarySearchKeyword(`${l?.id || ''} ${l?.title || ''} ${descriptionRaw}`));
+                            return `<article onclick="selectLib('${safeId}')" data-library-search="${searchIndex}" data-library-question-count="${questionCount}" class="quiz-library-card ${accentClass} border-2 border-transparent cursor-pointer group">
+                                <div class="quiz-library-head">
+                                    <div class="quiz-library-icon group-hover:rotate-12 transition-transform">${icon}</div>
+                                    <span class="quiz-count-pill">${questionCount} 题</span>
+                                </div>
+                                <h3 class="quiz-library-title text-base sm:text-lg font-bold leading-snug mt-3" title="${title}">${title}</h3>
+                                <p class="quiz-library-description mt-2" title="${description}">${description}</p>
+                                <div class="quiz-library-footer mt-4">
+                                    <span class="quiz-library-updated" title="更新时间：${updatedAtText}">
+                                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <circle cx="12" cy="12" r="9"></circle>
+                                            <path d="M12 7v5l3 2"></path>
+                                        </svg>
+                                        更新时间：${updatedAtText}
+                                    </span>
+                                    <span class="quiz-library-enter">
+                                        开始
+                                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M5 12h14"></path>
+                                            <path d="m13 6 6 6-6 6"></path>
+                                        </svg>
+                                    </span>
+                                </div>
+                            </article>`;
                         }).join('')}
                     </div>
+                    <div id="library-search-empty" class="home-search-empty hidden">
+                        <p class="home-search-empty-title">未找到匹配题集</p>
+                        <p class="home-search-empty-sub">试试更短的关键词，或按题集 ID 搜索。</p>
+                    </div>
                 </div>`;
+            bindHomeLibrarySearch(libraries, totalQuestions);
         }
 
         async function showLibrary(options = {}) {
+            setMainViewHomeLayout(true);
             const skipHistorySync = !!options.skipHistorySync;
             state.lib = null; state.mode = ''; state.idx = 0; state.answers = {}; state.pendingAnswers = {}; state.wrongAttempts = {}; state.isReview = false; state.practiceHints = {}; state.submitting = false;
             resetExamPanelUI();
@@ -1116,6 +1314,7 @@
         }
 
         async function selectLib(id, options = {}) {
+            setMainViewHomeLayout(false);
             const routeMode = normalizeRouteMode(options.routeMode);
             const skipHistorySync = !!options.skipHistorySync;
             const detailCacheKey = `${LIBRARY_DETAIL_CACHE_PREFIX}${id}`;
@@ -1143,15 +1342,17 @@
             updateModeSwitchUI();
             const questionCount = state.lib.questions.length;
             const introduction = (state.lib.description || '').trim() || '暂无题集介绍';
+            const updatedAtText = escapeHtml(getLibraryUpdatedAtText(state.lib));
             if (!skipHistorySync) syncUrlWithState({ libraryId: state.lib.id, mode: '' });
             
             $('main-view').innerHTML = `
-                <div class="max-w-3xl mx-auto py-8 animate__animated animate__fadeIn">
+                <div class="max-w-5xl mx-auto py-8 animate__animated animate__fadeIn">
                     <h2 class="text-3xl md:text-4xl font-black mb-8 text-center text-slate-800">${state.lib.title}</h2>
                     <div class="library-intro mb-5 rounded-2xl border border-slate-200/70 bg-white/90 shadow-sm p-5">
                         <h3 class="text-sm font-black text-slate-400 mb-2 tracking-widest">题集介绍</h3>
                         <p class="text-sm leading-relaxed text-slate-600">${introduction}</p>
                         <p class="text-xs text-slate-400 mt-3">题目数量：共 ${questionCount} 题</p>
+                        <p class="text-xs text-slate-400 mt-1">更新时间：${updatedAtText}</p>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <a href="${buildLibraryModeUrl(state.lib.id, 'browse')}" onclick="return openModeFromLink(event, 'browse')" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-indigo-500 text-left flex items-center gap-4">
