@@ -7,7 +7,8 @@
         const EXPORT_TAB_IDS = ['json', 'txt'];
         const EXPORT_TXT_FIELDS = ['type', 'question', 'options', 'answer', 'analysis', 'difficulty', 'chapter', 'updated_at'];
         const EXPORT_TXT_DEFAULT_FIELDS = ['type', 'question', 'options', 'answer', 'analysis', 'difficulty', 'chapter'];
-        const AI_BATCH_CHUNK_SIZE = 12;
+        const COLLECTOR_REQUEST_TIMEOUT_MS = 180000;
+        const SEARCH_INPUT_DEBOUNCE_MS = 220;
         const EXPORT_TXT_FIELD_LABELS = {
             type: '题型',
             question: '题目',
@@ -44,6 +45,7 @@ D. My parents object to my going out alone at night.
             questionKnowledgeFilter: 'all',
             questionDifficultyFilter: 'all',
             libraryVisibilityFilter: 'all',
+            selectedLibraryIds: [],
             questionBankKeyword: '',
             questionBankLoading: false,
             questionBankQuestions: [],
@@ -98,6 +100,7 @@ D. My parents object to my going out alone at night.
         const $ = (id) => document.getElementById(id);
         let confirmResolver = null;
         let hasAutoOpenedStandaloneModal = false;
+        let questionBankSearchTimer = null;
 
         function isAdminPage(pageKey) {
             return ADMIN_PAGE_KEY === pageKey;
@@ -248,14 +251,6 @@ D. My parents object to my going out alone at night.
             if ($('collector-import-btn')) $('collector-import-btn').disabled = true;
         }
 
-        function formatFileSize(size) {
-            const num = Number(size || 0);
-            if (!Number.isFinite(num) || num <= 0) return '--';
-            if (num < 1024) return `${num} B`;
-            if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
-            return `${(num / (1024 * 1024)).toFixed(1)} MB`;
-        }
-
         function renderCollectorRecordList() {
             const root = $('collector-list-root');
             if (!root) return;
@@ -347,6 +342,31 @@ D. My parents object to my going out alone at night.
             } finally {
                 state.collectorRecordsLoading = false;
                 renderCollectorRecordList();
+            }
+        }
+
+        async function clearCollectorRecordList() {
+            const currentCount = Array.isArray(state.collectorRecords) ? state.collectorRecords.length : 0;
+            if (currentCount <= 0) {
+                notify('采集列表已为空');
+                return;
+            }
+            const ok = await showConfirmDialog({
+                title: '清空采集列表',
+                message: `确认清空当前全部 ${currentCount} 条采集记录吗？该操作不可恢复。`,
+                confirmText: '确认清空',
+                confirmType: 'danger'
+            });
+            if (!ok) return;
+            try {
+                const result = await api('/collector-records/clear', { method: 'DELETE' });
+                const deletedCount = Number(result?.deleted_count || 0);
+                state.collectorRecordsSearch = '';
+                if ($('collector-list-search-input')) $('collector-list-search-input').value = '';
+                await loadCollectorRecordList();
+                notify(`已清空 ${deletedCount} 条采集记录`);
+            } catch (error) {
+                notify(error.message || '清空失败', true);
             }
         }
 
@@ -510,6 +530,12 @@ D. My parents object to my going out alone at night.
             }
             const previewRoot = $('collector-preview');
             if (previewRoot) previewRoot.innerHTML = '<p>AI 正在识别，请稍候...</p>';
+            const runBtn = $('collector-run-btn');
+            const runBtnText = runBtn ? runBtn.innerText : '';
+            if (runBtn) {
+                runBtn.disabled = true;
+                runBtn.innerText = '识别中...';
+            }
             const formData = new FormData();
             if (state.collectorFile) {
                 formData.append('file', state.collectorFile);
@@ -519,7 +545,11 @@ D. My parents object to my going out alone at night.
             formData.append('library_title', $('collector-library-title')?.value || '');
             formData.append('library_id', $('collector-library-id')?.value || '');
             try {
-                const result = await api('/ai-collect', { method: 'POST', body: formData });
+                const result = await api('/ai-collect', {
+                    method: 'POST',
+                    body: formData,
+                    timeoutMs: COLLECTOR_REQUEST_TIMEOUT_MS
+                });
                 const overrideTitle = ($('collector-library-title')?.value || '').trim();
                 const overrideId = ($('collector-library-id')?.value || '').trim();
                 if (result.payload && Array.isArray(result.payload.libraries) && result.payload.libraries.length) {
@@ -540,6 +570,11 @@ D. My parents object to my going out alone at night.
             } catch (error) {
                 if (previewRoot) previewRoot.innerHTML = `<p class="text-rose-600">${esc(error.message || 'AI 识别失败')}</p>`;
                 notify(error.message || 'AI 识别失败', true);
+            } finally {
+                if (runBtn) {
+                    runBtn.disabled = false;
+                    runBtn.innerText = runBtnText || '开始识别';
+                }
             }
         }
 
@@ -933,7 +968,7 @@ D. My parents object to my going out alone at night.
                                 <option value="batch-copy">复制题目</option>
                                 <option value="batch-move">移动题目</option>
                                 <option value="batch-export">导出题目</option>
-                                <option value="delete">删除</option>
+                                <option value="delete">删除题目</option>
                             </select>
                         </div>
                         <select id="question-bank-batch-difficulty" class="question-toolbar-control hidden px-3 py-2 rounded-lg border text-sm">
@@ -954,12 +989,12 @@ D. My parents object to my going out alone at night.
                         <span id="question-bank-selected-hint" class="text-xs text-slate-400 ml-1">已选 0 题</span>
                         <div class="question-toolbar-search ml-auto flex items-center gap-2 w-full md:w-auto">
                             <input id="question-bank-search-input" value="${esc(state.questionBankSearch)}" class="w-full md:w-72 px-3 py-2 rounded-lg border" placeholder="请输入题目关键词">
-                            <button id="question-bank-search-btn" title="搜索" aria-label="搜索" class="toolbar-icon-btn bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300">
+                            <button id="question-bank-search-btn" title="清空搜索" aria-label="清空搜索" class="toolbar-icon-btn bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                    <circle cx="11" cy="11" r="7"></circle>
-                                    <path d="m20 20-3.5-3.5"></path>
+                                    <path d="M18 6 6 18"></path>
+                                    <path d="m6 6 12 12"></path>
                                 </svg>
-                                <span class="sr-only">搜索</span>
+                                <span class="sr-only">清空搜索</span>
                             </button>
                         </div>
                     </div>
@@ -1278,6 +1313,21 @@ D. My parents object to my going out alone at night.
             notify(`导出成功：${filenameBase}.json`);
         }
 
+        function scheduleQuestionBankSearch(immediate = false) {
+            if (questionBankSearchTimer) {
+                clearTimeout(questionBankSearchTimer);
+                questionBankSearchTimer = null;
+            }
+            if (immediate) {
+                loadQuestionBank();
+                return;
+            }
+            questionBankSearchTimer = setTimeout(() => {
+                questionBankSearchTimer = null;
+                loadQuestionBank();
+            }, SEARCH_INPUT_DEBOUNCE_MS);
+        }
+
         async function loadQuestionBank() {
             state.questionBankLoading = true;
             renderQuestionBankList();
@@ -1479,196 +1529,6 @@ D. My parents object to my going out alone at night.
             }
         }
 
-        async function runAiGenerateForPreviewItem({ question, type, options }, button, onApply, optionsArg = {}) {
-            if (!question || !String(question).trim()) {
-                notify('题目不能为空', true);
-                return false;
-            }
-            const silent = Boolean(optionsArg.silent);
-            try {
-                if (button) {
-                    button.disabled = true;
-                    button.dataset.loading = '1';
-                    button.innerText = '生成中...';
-                }
-                const result = await api('/ai-generate', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        question: String(question).trim(),
-                        type: normalizeQuestionType(type || 'single'),
-                        options: Array.isArray(options) ? options : []
-                    })
-                });
-                if (onApply) onApply(result || {});
-                if (!silent) {
-                    notify('AI 生成完成');
-                }
-                return true;
-            } catch (error) {
-                if (!silent) {
-                    notify(error.message || 'AI 生成失败', true);
-                }
-                return false;
-            } finally {
-                if (button) {
-                    button.disabled = false;
-                    button.dataset.loading = '0';
-                    button.innerText = 'AI生成';
-                }
-            }
-        }
-
-        function shouldAiGenerateItem(item) {
-            const answerEmpty = !item?.answer || !String(item.answer).trim();
-            const analysisEmpty = !item?.analysis || !String(item.analysis).trim();
-            const chapterEmpty = !item?.chapter || !String(item.chapter).trim();
-            return answerEmpty || analysisEmpty || chapterEmpty;
-        }
-
-        async function runBatchAiGenerateItems(tasks, applyResult, onProgress, buttonLabel) {
-            const total = tasks.length;
-            let completed = 0;
-            let successCount = 0;
-            for (let i = 0; i < total; i += AI_BATCH_CHUNK_SIZE) {
-                const slice = tasks.slice(i, i + AI_BATCH_CHUNK_SIZE);
-                if (onProgress) onProgress(Math.min(i + slice.length, total), total);
-                const response = await api('/ai-generate-batch', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        items: slice.map((task) => ({
-                            question: task.item.question,
-                            type: task.item.type,
-                            options: task.item.options
-                        }))
-                    })
-                });
-                const items = Array.isArray(response?.items) ? response.items : [];
-                slice.forEach((task, idx) => {
-                    const result = items[idx] || {};
-                    applyResult(task, result);
-                    if (result.answer || result.analysis || result.chapter) {
-                        successCount += 1;
-                    }
-                    completed += 1;
-                });
-                if (onProgress) onProgress(completed, total);
-            }
-            if (buttonLabel) {
-                buttonLabel(successCount, total);
-            }
-            return successCount;
-        }
-
-        async function runBatchAiGenerateCollector(button) {
-            if (!state.collectorPayload) {
-                notify('暂无可生成的题目', true);
-                return;
-            }
-            const tasks = [];
-            state.collectorPayload.libraries.forEach((lib, libIndex) => {
-                (lib.questions || []).forEach((item, questionIndex) => {
-                    if (!item?.question) return;
-                    if (shouldAiGenerateItem(item)) {
-                        tasks.push({ libIndex, questionIndex, item });
-                    }
-                });
-            });
-            if (!tasks.length) {
-                notify('没有需要生成的题目');
-                return;
-            }
-            if (button) {
-                button.disabled = true;
-            }
-            const successCount = await runBatchAiGenerateItems(
-                tasks,
-                (task, result) => {
-                    if (result.answer) task.item.answer = result.answer;
-                    if (result.analysis) task.item.analysis = result.analysis;
-                    if (result.chapter) task.item.chapter = result.chapter;
-                },
-                (completed, total) => {
-                    if (button) button.innerText = `生成中 ${completed}/${total}`;
-                }
-            );
-            if (button) {
-                button.disabled = false;
-                button.innerText = '批量AI生成';
-            }
-            renderCollectorPreview(state.collectorPayload, state.collectorFilename);
-            notify(`批量生成完成：${successCount} 道题`);
-        }
-
-        async function runBatchAiGenerateImportJson(button) {
-            if (!state.importJsonPayload) {
-                notify('暂无可生成的题目', true);
-                return;
-            }
-            const tasks = [];
-            state.importJsonPayload.libraries.forEach((lib, libIndex) => {
-                (lib.questions || []).forEach((item, questionIndex) => {
-                    if (!item?.question) return;
-                    if (shouldAiGenerateItem(item)) {
-                        tasks.push({ libIndex, questionIndex, item });
-                    }
-                });
-            });
-            if (!tasks.length) {
-                notify('没有需要生成的题目');
-                return;
-            }
-            if (button) button.disabled = true;
-            const successCount = await runBatchAiGenerateItems(
-                tasks,
-                (task, result) => {
-                    if (result.answer) task.item.answer = result.answer;
-                    if (result.analysis) task.item.analysis = result.analysis;
-                    if (result.chapter) task.item.chapter = result.chapter;
-                },
-                (completed, total) => {
-                    if (button) button.innerText = `生成中 ${completed}/${total}`;
-                }
-            );
-            if (button) {
-                button.disabled = false;
-                button.innerText = '批量AI生成';
-            }
-            renderImportJsonPreview();
-            notify(`批量生成完成：${successCount} 道题`);
-        }
-
-        async function runBatchAiGenerateImportDoc(button) {
-            if (!state.importDocQuestions.length) {
-                notify('暂无可生成的题目', true);
-                return;
-            }
-            const tasks = state.importDocQuestions
-                .map((item, index) => ({ item, index }))
-                .filter(({ item }) => item?.question && shouldAiGenerateItem(item));
-            if (!tasks.length) {
-                notify('没有需要生成的题目');
-                return;
-            }
-            if (button) button.disabled = true;
-            const successCount = await runBatchAiGenerateItems(
-                tasks,
-                (task, result) => {
-                    if (result.answer) task.item.answer = result.answer;
-                    if (result.analysis) task.item.analysis = result.analysis;
-                    if (result.chapter) task.item.chapter = result.chapter;
-                },
-                (completed, total) => {
-                    if (button) button.innerText = `生成中 ${completed}/${total}`;
-                }
-            );
-            if (button) {
-                button.disabled = false;
-                button.innerText = '批量AI生成';
-            }
-            renderImportDocPreview();
-            notify(`批量生成完成：${successCount} 道题`);
-        }
-
         async function runAiGenerateForCard(card, button) {
             try {
                 const payload = buildAiGeneratePayloadFromCard(card);
@@ -1714,7 +1574,7 @@ D. My parents object to my going out alone at night.
             if (!question) return null;
             const type = normalizeQuestionType(raw.type || 'single');
             let questionOptions = Array.isArray(raw.options) ? raw.options : [];
-            questionOptions = questionOptions.map((item) => String(item ?? '').trim()).filter(Boolean);
+            questionOptions = questionOptions.map((item) => stripOptionPrefix(item)).filter(Boolean);
             if (type === 'judge' && questionOptions.length === 0) {
                 questionOptions = ['正确', '错误'];
             }
@@ -1867,19 +1727,6 @@ D. My parents object to my going out alone at night.
 
         function normalizeSearchText(text) {
             return String(text ?? '').trim().toLowerCase();
-        }
-
-        function buildQuestionSearchText(card) {
-            const payload = [
-                card.getAttribute('data-question-id'),
-                card.querySelector('.q-question')?.value || '',
-                card.querySelector('.q-options')?.value || '',
-                card.querySelector('.q-type')?.value || '',
-                card.querySelector('.q-analysis')?.value || '',
-                card.querySelector('.q-knowledge')?.value || '',
-                card.querySelector('.q-answer')?.value || ''
-            ].join(' ');
-            return normalizeSearchText(payload);
         }
 
         function applyQuestionSearch() {
@@ -2374,7 +2221,16 @@ D. My parents object to my going out alone at night.
         }
 
         function stripOptionPrefix(optionText) {
-            return String(optionText || '').trim().replace(/^[A-Ha-h][\.\、\)\s]+/, '').trim();
+            let text = String(optionText || '').trim();
+            for (let i = 0; i < 4; i += 1) {
+                const next = text
+                    .replace(/^[\(\[（【]\s*[A-Ha-h]\s*[\)\]）】]\s*/, '')
+                    .replace(/^[A-Ha-h]\s*[\.．、\):：]\s*/, '')
+                    .trim();
+                if (next === text) break;
+                text = next;
+            }
+            return text;
         }
 
         function normalizeOptionLines(rawText) {
@@ -3131,29 +2987,73 @@ D. My parents object to my going out alone at night.
             $('create-library-modal').classList.remove('flex');
         }
 
+        function getVisibleLibraries(filterValue = state.libraryVisibilityFilter) {
+            if (filterValue === 'public') return state.libraries.filter((lib) => lib?.is_public !== false);
+            if (filterValue === 'private') return state.libraries.filter((lib) => lib?.is_public === false);
+            return [...state.libraries];
+        }
+
+        function sanitizeSelectedLibraryIds() {
+            const idSet = new Set(state.libraries.map((lib) => String(lib.id || '')));
+            state.selectedLibraryIds = Array.from(new Set(
+                (state.selectedLibraryIds || [])
+                    .map((item) => String(item || '').trim())
+                    .filter((id) => id && idSet.has(id))
+            ));
+        }
+
+        function syncLibrarySelectedCount() {
+            sanitizeSelectedLibraryIds();
+            const selectedSet = new Set(state.selectedLibraryIds);
+            const label = $('library-selected-hint');
+            if (label) label.innerText = `已选 ${selectedSet.size} 个`;
+
+            const filterValue = state.libraryVisibilityFilter === 'public' || state.libraryVisibilityFilter === 'private'
+                ? state.libraryVisibilityFilter
+                : 'all';
+            const visibleIds = getVisibleLibraries(filterValue).map((lib) => String(lib.id || ''));
+            const selectedVisibleCount = visibleIds.filter((id) => selectedSet.has(id)).length;
+            const checkAll = $('library-check-all');
+            if (checkAll) {
+                checkAll.checked = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+                checkAll.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
+            }
+            updateLibraryBatchControls();
+        }
+
+        function updateLibraryBatchControls() {
+            const action = String($('library-batch-action')?.value || '').trim();
+            const runBtn = $('library-batch-run-btn');
+            if (runBtn) {
+                runBtn.innerText = action === 'delete' ? '删除题集' : '执行';
+                runBtn.disabled = !action || !state.selectedLibraryIds.length;
+            }
+        }
+
         function renderLibraryList() {
             const container = $('library-list');
             const filterSelect = $('library-visibility-filter');
+            const canBatchLibraries = isAdminPage('library-management');
             const filterValue = state.libraryVisibilityFilter === 'public' || state.libraryVisibilityFilter === 'private'
                 ? state.libraryVisibilityFilter
                 : 'all';
             if (filterSelect && filterSelect.value !== filterValue) {
                 filterSelect.value = filterValue;
             }
-            const visibleLibraries = state.libraries.filter((lib) => {
-                if (filterValue === 'public') return lib?.is_public !== false;
-                if (filterValue === 'private') return lib?.is_public === false;
-                return true;
-            });
+            const visibleLibraries = getVisibleLibraries(filterValue);
+            sanitizeSelectedLibraryIds();
+            const selectedSet = new Set(state.selectedLibraryIds);
 
             if (!state.libraries.length) {
                 container.innerHTML = '<div class="text-sm text-slate-400 text-center py-8 w-full">暂无题集，点击新建题集</div>';
+                syncLibrarySelectedCount();
                 renderLibraryPanelState();
                 return;
             }
 
             if (!visibleLibraries.length) {
                 container.innerHTML = '<div class="text-sm text-slate-400 text-center py-8 w-full">当前筛选下暂无题集</div>';
+                syncLibrarySelectedCount();
                 renderLibraryPanelState();
                 return;
             }
@@ -3161,24 +3061,93 @@ D. My parents object to my going out alone at night.
             const cards = visibleLibraries.map((lib) => {
                 const active = state.currentLibrary && state.currentLibrary.id === lib.id;
                 const visibility = lib.is_public === false ? '私有' : '公开';
+                const libId = String(lib.id || '');
+                const checked = selectedSet.has(libId) ? 'checked' : '';
+                const checkCell = canBatchLibraries
+                    ? `<label class="library-compact-check" title="选择题集">
+                            <input type="checkbox" class="library-row-check rounded border-slate-300" data-lib-id="${esc(libId)}" ${checked}>
+                       </label>`
+                    : '';
                 return `
-                    <button
-                        type="button"
-                        data-lib-id="${esc(lib.id)}"
-                        title="${esc(lib.title)} (${esc(lib.id)}) · ${visibility}"
-                        class="library-compact-btn border transition ${active ? 'is-active' : ''}"
-                    >
-                        <span class="library-compact-icon">${esc(lib.icon || '📚')}</span>
-                        <span class="library-compact-title">${esc(lib.title)}</span>
-                        ${lib.is_public === false ? '<span class="text-[10px] text-slate-400">🔒</span>' : ''}
-                    </button>
+                    <div class="library-compact-item ${active ? 'is-active' : ''}">
+                        ${checkCell}
+                        <button
+                            type="button"
+                            data-lib-id="${esc(lib.id)}"
+                            title="${esc(lib.title)} (${esc(lib.id)}) · ${visibility}"
+                            class="library-compact-btn border transition ${active ? 'is-active' : ''}"
+                        >
+                            <span class="library-compact-icon">${esc(lib.icon || '📚')}</span>
+                            <span class="library-compact-title">${esc(lib.title)}</span>
+                            ${lib.is_public === false ? '<span class="text-[10px] text-slate-400">🔒</span>' : ''}
+                        </button>
+                    </div>
                 `;
             }).join('');
 
             container.innerHTML = `
                 <div class="library-compact-grid">${cards}</div>
             `;
+            syncLibrarySelectedCount();
             renderLibraryPanelState();
+        }
+
+        async function runLibraryBatchAction() {
+            const action = String($('library-batch-action')?.value || '').trim();
+            sanitizeSelectedLibraryIds();
+            const selectedIds = [...state.selectedLibraryIds];
+            if (!action) {
+                notify('请选择批量操作', true);
+                return;
+            }
+            if (!selectedIds.length) {
+                notify('请先勾选要操作的题集', true);
+                return;
+            }
+
+            if (action === 'delete') {
+                const ok = await showConfirmDialog({
+                    title: '批量删除题集',
+                    message: `确认删除已选中的 ${selectedIds.length} 个题集吗？该操作不可恢复。`,
+                    confirmText: '确认删除',
+                    confirmType: 'danger'
+                });
+                if (!ok) return;
+            } else {
+                const actionText = action === 'set-public' ? '设为公开' : '设为私有';
+                const ok = await showConfirmDialog({
+                    title: `批量${actionText}`,
+                    message: `确认将已选中的 ${selectedIds.length} 个题集${actionText}吗？`,
+                    confirmText: '确认执行'
+                });
+                if (!ok) return;
+            }
+
+            try {
+                const result = await api('/libraries/batch', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        action,
+                        library_ids: selectedIds
+                    })
+                });
+                const affectedCount = Number(result?.affected_count || 0);
+                if (action === 'delete') {
+                    notify(`批量删除完成：${affectedCount} 个题集`);
+                    const deletedSet = new Set(selectedIds);
+                    if (state.currentLibrary && deletedSet.has(String(state.currentLibrary.id))) {
+                        state.currentLibrary = null;
+                    }
+                    state.selectedLibraryIds = state.selectedLibraryIds.filter((id) => !deletedSet.has(String(id)));
+                    await loadLibraries();
+                } else {
+                    notify(`批量更新完成：${affectedCount} 个题集已更新`);
+                    await loadLibraries(state.currentLibrary?.id, { loadDetails: isAdminPage('library-management') });
+                }
+                syncLibrarySelectedCount();
+            } catch (error) {
+                notify(error.message || '批量操作失败', true);
+            }
         }
 
         function renderEditor() {
@@ -3213,6 +3182,7 @@ D. My parents object to my going out alone at night.
                 .filter((item) => item.id !== lib.id)
                 .map((item) => `<option value="${esc(item.id)}">${esc(item.icon)} ${esc(item.title)}</option>`)
                 .join('');
+            const questionCount = Array.isArray(lib.questions) ? lib.questions.length : 0;
 
             $('editor-empty').classList.add('hidden');
             $('editor').classList.remove('hidden');
@@ -3231,6 +3201,10 @@ D. My parents object to my going out alone at night.
                         <label class="text-sm">
                             <span class="text-slate-500">图标</span>
                             <input id="lib-icon" value="${esc(lib.icon)}" class="w-full mt-1 px-3 py-2 rounded-lg border">
+                        </label>
+                        <label class="text-sm">
+                            <span class="text-slate-500">题目数量</span>
+                            <input value="${questionCount} 题" class="w-full mt-1 px-3 py-2 rounded-lg border bg-slate-100 text-slate-600" readonly>
                         </label>
                         <label class="text-sm md:col-span-3">
                             <span class="text-slate-500">题集介绍</span>
@@ -3276,7 +3250,7 @@ D. My parents object to my going out alone at night.
                                     <option value="batch-copy">复制题目</option>
                                     <option value="batch-move">移动题目</option>
                                     <option value="batch-export">导出题目</option>
-                                    <option value="delete">删除</option>
+                                    <option value="delete">删除题目</option>
                                 </select>
                             </div>
                             <select id="question-batch-difficulty" class="question-toolbar-control hidden px-3 py-2 rounded-lg border text-sm">
@@ -3297,12 +3271,12 @@ D. My parents object to my going out alone at night.
                             <span id="question-selected-hint" class="text-xs text-slate-400 ml-1">已选 0 题</span>
                             <div class="question-toolbar-search ml-auto flex items-center gap-2 w-full md:w-auto">
                                 <input id="question-search-input" value="${esc(state.questionSearch)}" class="w-full md:w-72 px-3 py-2 rounded-lg border" placeholder="请输入题目关键词">
-                                <button id="question-search-btn" title="搜索" aria-label="搜索" class="toolbar-icon-btn bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300">
+                                <button id="question-search-btn" title="清空搜索" aria-label="清空搜索" class="toolbar-icon-btn bg-slate-100 text-slate-600 hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-300">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                        <circle cx="11" cy="11" r="7"></circle>
-                                        <path d="m20 20-3.5-3.5"></path>
+                                        <path d="M18 6 6 18"></path>
+                                        <path d="m6 6 12 12"></path>
                                     </svg>
-                                    <span class="sr-only">搜索</span>
+                                    <span class="sr-only">清空搜索</span>
                                 </button>
                             </div>
                         </div>
@@ -3439,7 +3413,9 @@ D. My parents object to my going out alone at night.
                 : isAdminPage('question-bank');
             try {
                 state.libraries = await api('/libraries');
+                sanitizeSelectedLibraryIds();
                 if (!state.libraries.length) {
+                    state.selectedLibraryIds = [];
                     state.currentLibrary = null;
                     renderLibraryList();
                     renderEditor();
@@ -4123,6 +4099,9 @@ D. My parents object to my going out alone at night.
             state.collectorRecordsSearch = String(event.target?.value || '').trim();
             renderCollectorRecordList();
         });
+        $('collector-list-clear-btn')?.addEventListener('click', async () => {
+            await clearCollectorRecordList();
+        });
         $('collector-list-root')?.addEventListener('click', async (event) => {
             const copyBtn = event.target.closest('.collector-record-copy-btn');
             if (copyBtn) {
@@ -4172,9 +4151,9 @@ D. My parents object to my going out alone at night.
             const target = event.target;
             if (target.id === 'question-bank-search-btn' || target.closest('#question-bank-search-btn')) {
                 const input = $('question-bank-search-input');
-                const keyword = String(input?.value || '').trim();
-                state.questionBankKeyword = keyword;
-                state.questionBankSearch = keyword;
+                state.questionBankKeyword = '';
+                state.questionBankSearch = '';
+                if (input) input.value = '';
                 await loadQuestionBank();
                 if (input) input.focus();
                 return;
@@ -4326,6 +4305,14 @@ D. My parents object to my going out alone at night.
                 }
             }
         });
+        $('question-bank-list')?.addEventListener('input', (event) => {
+            if (event.target.id !== 'question-bank-search-input') return;
+            const input = event.target;
+            const keyword = String(input?.value || '').trim();
+            state.questionBankKeyword = keyword;
+            state.questionBankSearch = keyword;
+            scheduleQuestionBankSearch();
+        });
         $('question-bank-list')?.addEventListener('keydown', (event) => {
             if (event.target.id !== 'question-bank-search-input') return;
             if (event.key !== 'Enter') return;
@@ -4334,7 +4321,7 @@ D. My parents object to my going out alone at night.
             const keyword = String(input?.value || '').trim();
             state.questionBankKeyword = keyword;
             state.questionBankSearch = keyword;
-            loadQuestionBank();
+            scheduleQuestionBankSearch(true);
         });
 
         $('question-bank-list')?.addEventListener('change', (event) => {
@@ -4450,11 +4437,7 @@ D. My parents object to my going out alone at night.
         $('library-visibility-filter')?.addEventListener('change', async (event) => {
             const value = String(event.target?.value || 'all').trim();
             state.libraryVisibilityFilter = ['all', 'public', 'private'].includes(value) ? value : 'all';
-            const visibleLibraries = state.libraries.filter((lib) => {
-                if (state.libraryVisibilityFilter === 'public') return lib?.is_public !== false;
-                if (state.libraryVisibilityFilter === 'private') return lib?.is_public === false;
-                return true;
-            });
+            const visibleLibraries = getVisibleLibraries(state.libraryVisibilityFilter);
             if (
                 state.currentLibrary
                 && !visibleLibraries.some((lib) => lib.id === state.currentLibrary.id)
@@ -4467,6 +4450,9 @@ D. My parents object to my going out alone at night.
         });
 
         $('library-list').addEventListener('click', async (event) => {
+            if (event.target.closest('.library-row-check') || event.target.closest('.library-compact-check')) {
+                return;
+            }
             const btn = event.target.closest('[data-lib-id]');
             if (!btn) return;
             const libraryId = btn.getAttribute('data-lib-id');
@@ -4477,14 +4463,48 @@ D. My parents object to my going out alone at night.
             }
         });
 
+        $('library-list').addEventListener('change', (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLInputElement)) return;
+            if (!target.classList.contains('library-row-check')) return;
+            const libraryId = String(target.getAttribute('data-lib-id') || '').trim();
+            if (!libraryId) return;
+            const selectedSet = new Set(state.selectedLibraryIds.map((id) => String(id)));
+            if (target.checked) selectedSet.add(libraryId);
+            else selectedSet.delete(libraryId);
+            state.selectedLibraryIds = Array.from(selectedSet);
+            syncLibrarySelectedCount();
+        });
+
+        $('library-check-all')?.addEventListener('change', (event) => {
+            const checked = Boolean(event.target?.checked);
+            const visibleIds = getVisibleLibraries().map((lib) => String(lib.id || ''));
+            const selectedSet = new Set(state.selectedLibraryIds.map((id) => String(id)));
+            if (checked) {
+                visibleIds.forEach((id) => selectedSet.add(id));
+            } else {
+                visibleIds.forEach((id) => selectedSet.delete(id));
+            }
+            state.selectedLibraryIds = Array.from(selectedSet);
+            renderLibraryList();
+        });
+
+        $('library-batch-action')?.addEventListener('change', () => {
+            updateLibraryBatchControls();
+        });
+
+        $('library-batch-run-btn')?.addEventListener('click', async () => {
+            await runLibraryBatchAction();
+        });
+
         $('editor').addEventListener('click', async (event) => {
             if (!state.currentLibrary) return;
             const target = event.target;
 
             if (target.id === 'question-search-btn' || target.closest('#question-search-btn')) {
                 const searchInput = $('question-search-input');
-                const keyword = String(searchInput?.value || '').trim();
-                state.questionSearch = keyword;
+                state.questionSearch = '';
+                if (searchInput) searchInput.value = '';
                 applyQuestionSearch();
                 if (searchInput) searchInput.focus();
                 return;
@@ -4695,6 +4715,13 @@ D. My parents object to my going out alone at night.
                     notify(error.message, true);
                 }
             }
+        });
+        $('editor').addEventListener('input', (event) => {
+            if (event.target.id !== 'question-search-input') return;
+            const searchInput = event.target;
+            const keyword = String(searchInput?.value || '').trim();
+            state.questionSearch = keyword;
+            applyQuestionSearch();
         });
         $('editor').addEventListener('keydown', (event) => {
             if (event.target.id !== 'question-search-input') return;

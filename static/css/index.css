@@ -36,56 +36,65 @@
 
         /* 手机端顶部工具栏：均匀分布且支持横向拖动 */
         @media (max-width: 768px) {
-            nav {
+            body.quiz-session-active nav {
                 display: grid !important;
                 grid-template-columns: auto minmax(0, 1fr);
                 gap: 0.5rem;
                 padding-left: 0.5rem !important;
                 padding-right: 0.5rem !important;
             }
-            #top-brand {
+            body.quiz-session-active #top-brand {
                 min-width: max-content;
                 gap: 0.35rem !important;
             }
-            #top-actions {
+            body.quiz-session-active #top-actions {
                 min-width: 0;
                 display: flex !important;
                 align-items: center;
+                justify-content: flex-start;
                 gap: 0.45rem;
                 overflow-x: auto;
                 overflow-y: hidden;
                 -webkit-overflow-scrolling: touch;
+                overscroll-behavior-x: contain;
+                touch-action: pan-x;
                 scrollbar-width: none;
                 -ms-overflow-style: none;
                 padding-bottom: 2px;
+                scroll-behavior: smooth;
+                cursor: grab;
             }
-            #top-actions::-webkit-scrollbar { display: none; }
-            #top-actions > * {
+            body.quiz-session-active #top-actions.is-dragging {
+                cursor: grabbing;
+                user-select: none;
+            }
+            body.quiz-session-active #top-actions::-webkit-scrollbar { display: none; }
+            body.quiz-session-active #top-actions > * {
                 flex: 0 0 auto;
                 min-width: 2.25rem;
             }
-            #top-actions button,
-            #top-actions a {
+            body.quiz-session-active #top-actions button,
+            body.quiz-session-active #top-actions a {
                 touch-action: manipulation;
             }
             /* 下拉面板改为 fixed，避免被横向滚动容器裁切导致“点击无反应” */
-            #top-actions #font-size-wrap,
-            #top-actions #mode-switch-wrap {
+            body.quiz-session-active #top-actions #font-size-wrap,
+            body.quiz-session-active #top-actions #mode-switch-wrap {
                 position: static !important;
             }
-            #top-actions #font-size-panel,
-            #top-actions #mode-switch-menu {
+            body.quiz-session-active #top-actions #font-size-panel,
+            body.quiz-session-active #top-actions #mode-switch-menu {
                 position: fixed !important;
                 top: calc(env(safe-area-inset-top, 0px) + 4.25rem) !important;
                 right: 0.5rem !important;
                 left: auto !important;
                 z-index: 160 !important;
             }
-            #top-actions #font-size-panel {
+            body.quiz-session-active #top-actions #font-size-panel {
                 width: min(16rem, calc(100vw - 1rem)) !important;
             }
-            #top-actions #font-size-btn,
-            #top-actions #mode-switch-btn {
+            body.quiz-session-active #top-actions #font-size-btn,
+            body.quiz-session-active #top-actions #mode-switch-btn {
                 width: auto;
                 justify-content: center;
                 padding-left: 0.5rem;
@@ -216,7 +225,7 @@
             border-color: rgba(51, 65, 85, 0.7);
         }
         body.theme-dark #theme-toggle,
-        body.theme-dark #restart-btn,
+        body.theme-dark #home-refresh-btn,
         body.theme-dark #font-size-btn,
         body.theme-dark #nav-mode-toggle,
         body.theme-dark #mode-switch-btn,
@@ -226,7 +235,7 @@
             color: #cbd5e1 !important;
         }
         body.theme-dark #theme-toggle:hover,
-        body.theme-dark #restart-btn:hover,
+        body.theme-dark #home-refresh-btn:hover,
         body.theme-dark #font-size-btn:hover,
         body.theme-dark #nav-mode-toggle:hover,
         body.theme-dark #mode-switch-btn:hover,

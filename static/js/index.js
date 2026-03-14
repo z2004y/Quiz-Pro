@@ -21,7 +21,6 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
-
         function buildApiUrl(endpoint) {
             const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
             return `${API_BASE_URL}${normalizedEndpoint}`;
@@ -131,6 +130,99 @@
 
         function syncDeviceProfileClass() {
             document.body.classList.toggle('tablet-landscape', isTabletLandscape());
+        }
+
+        function isQuizSessionActive() {
+            return !!state.lib && !!state.mode;
+        }
+
+        function syncQuizSessionClass() {
+            document.body.classList.toggle('quiz-session-active', isQuizSessionActive());
+        }
+
+        function updateHomeRefreshButtonVisibility() {
+            const btn = $('home-refresh-btn');
+            if (!btn) return;
+            btn.classList.remove('hidden');
+        }
+
+        function initTopActionsDragScroll() {
+            const container = $('top-actions');
+            if (!container) return;
+
+            let pointerDown = false;
+            let dragging = false;
+            let suppressClick = false;
+            let activePointerId = null;
+            let startX = 0;
+            let startScrollLeft = 0;
+            const DRAG_THRESHOLD = 8;
+
+            const hasOverflow = () => (container.scrollWidth - container.clientWidth) > 2;
+            const isEnabled = () => document.body.classList.contains('quiz-session-active') && window.innerWidth <= 768;
+
+            const endPointerInteraction = (event) => {
+                if (!pointerDown) return;
+                if (event && activePointerId !== null && event.pointerId !== activePointerId) return;
+
+                pointerDown = false;
+                activePointerId = null;
+                container.classList.remove('is-dragging');
+
+                if (dragging) {
+                    setTimeout(() => { suppressClick = false; }, 120);
+                } else {
+                    suppressClick = false;
+                }
+                dragging = false;
+            };
+
+            container.addEventListener('pointerdown', (event) => {
+                if (event.pointerType === 'mouse' && event.button !== 0) return;
+                if (!isEnabled()) return;
+                if (!hasOverflow()) return;
+
+                pointerDown = true;
+                dragging = false;
+                suppressClick = false;
+                activePointerId = event.pointerId;
+                startX = event.clientX;
+                startScrollLeft = container.scrollLeft;
+
+                if (typeof container.setPointerCapture === 'function') {
+                    try { container.setPointerCapture(event.pointerId); } catch (_) {}
+                }
+            });
+
+            container.addEventListener('pointermove', (event) => {
+                if (!pointerDown || event.pointerId !== activePointerId) return;
+                if (!isEnabled()) return;
+
+                const deltaX = event.clientX - startX;
+                if (!dragging && Math.abs(deltaX) >= DRAG_THRESHOLD) {
+                    dragging = true;
+                    suppressClick = true;
+                    container.classList.add('is-dragging');
+                }
+                if (!dragging) return;
+
+                container.scrollLeft = startScrollLeft - deltaX;
+                event.preventDefault();
+            });
+
+            container.addEventListener('pointerup', endPointerInteraction);
+            container.addEventListener('pointercancel', endPointerInteraction);
+            container.addEventListener('pointerleave', (event) => {
+                if (event.pointerType === 'mouse') endPointerInteraction(event);
+            });
+
+            container.addEventListener('click', (event) => {
+                if (!isEnabled()) return;
+                if (!suppressClick) return;
+                event.preventDefault();
+                event.stopPropagation();
+                suppressClick = false;
+            }, true);
         }
 
         function showNotice(message, type = 'error') {
@@ -301,21 +393,15 @@
             const navToggle = $('nav-mode-toggle');
             const navIcon = $('nav-mode-icon');
             const fontWrap = $('font-size-wrap');
-            const restartBtn = $('restart-btn');
             if (!wrap || !label) return;
 
-            const canShow = !!state.lib && !!state.mode && !state.isReview;
+            const canShowInReview = state.isReview && state.mode === 'exam';
+            const canShow = !!state.lib && !!state.mode && (!state.isReview || canShowInReview);
+            syncQuizSessionClass();
+            updateHomeRefreshButtonVisibility();
             wrap.classList.toggle('hidden', !canShow);
             if (navWrap) navWrap.classList.toggle('hidden', !canShow);
             if (fontWrap) fontWrap.classList.toggle('hidden', !canShow);
-            if (restartBtn) {
-                restartBtn.classList.toggle('hidden', !canShow);
-                if (canShow) {
-                    const title = state.mode === 'exam' ? '重新开始考试' : '重新开始本次刷题';
-                    restartBtn.title = title;
-                    restartBtn.setAttribute('aria-label', title);
-                }
-            }
             if (!canShow) {
                 closeModeSwitchMenu();
                 closeFontSizePanel();
@@ -355,6 +441,50 @@
             return ` style="font-size:${scale}em;"`;
         }
 
+        function parseChoiceAnswerIndex(answerValue, optionCount = null, questionType = 'single') {
+            const token = String(answerValue ?? '').trim().replace(/[。；;]+$/g, '');
+            if (!token) return null;
+            if (/^[A-Za-z]$/.test(token)) {
+                const idx = token.toUpperCase().charCodeAt(0) - 65;
+                if (optionCount === null || (idx >= 0 && idx < optionCount)) return idx;
+                return null;
+            }
+            if (/^-?\d+$/.test(token)) {
+                const idx = Number.parseInt(token, 10);
+                if (optionCount === null || (idx >= 0 && idx < optionCount)) return idx;
+                return null;
+            }
+            if (questionType === 'judge') {
+                const normalized = normalizeJudgeAnswerValue(token);
+                if (normalized !== null) return Number(normalized);
+            }
+            return null;
+        }
+
+        function buildAnalysisModeAnswers(questions) {
+            const result = {};
+            (questions || []).forEach((question, idx) => {
+                const qType = getQuestionType(question);
+                if (qType === 'multiple') {
+                    result[idx] = parseMultipleAnswerValue(question?.ans);
+                    return;
+                }
+                if (qType === 'fill') {
+                    const blankCount = getFillBlankCount(question);
+                    result[idx] = getFillDraftValues(question?.ans, blankCount).join('|');
+                    return;
+                }
+                if (qType === 'qa') {
+                    result[idx] = String(question?.ans ?? '');
+                    return;
+                }
+                const optionCount = Array.isArray(question?.options) ? question.options.length : null;
+                const parsedIndex = parseChoiceAnswerIndex(question?.ans, optionCount, qType);
+                result[idx] = parsedIndex !== null ? parsedIndex : String(question?.ans ?? '');
+            });
+            return result;
+        }
+
         const COMPACTNESS_PRESETS = [
             {
                 optionsWrap: 'space-y-3',
@@ -371,8 +501,8 @@
                 analysisText: 'leading-relaxed text-slate-600 font-medium',
                 cardsWrap: 'space-y-4',
                 footer: 'flex justify-between items-center gap-3 mt-8 pt-6 pb-safe',
-                prevButton: 'px-9 py-3 bg-slate-900 text-white rounded-2xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed',
-                nextButton: 'px-9 py-3 bg-slate-900 text-white rounded-2xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed'
+                prevButton: 'px-9 py-3 rounded-2xl font-bold border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 hover:border-slate-400 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed',
+                nextButton: 'px-9 py-3 rounded-2xl font-bold text-white bg-gradient-to-r from-indigo-600 to-cyan-500 shadow-[0_10px_24px_rgba(79,70,229,0.3)] hover:from-indigo-500 hover:to-cyan-400 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none'
             },
             {
                 optionsWrap: 'space-y-2.5',
@@ -389,8 +519,8 @@
                 analysisText: 'leading-relaxed text-slate-600 font-medium',
                 cardsWrap: 'space-y-3',
                 footer: 'flex justify-between items-center gap-3 mt-6 pt-5 pb-safe',
-                prevButton: 'px-8 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform text-sm disabled:opacity-40 disabled:cursor-not-allowed',
-                nextButton: 'px-8 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform text-sm disabled:opacity-40 disabled:cursor-not-allowed'
+                prevButton: 'px-8 py-2.5 rounded-xl font-bold border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 hover:border-slate-400 active:scale-[0.98] transition-all text-sm disabled:opacity-40 disabled:cursor-not-allowed',
+                nextButton: 'px-8 py-2.5 rounded-xl font-bold text-white bg-gradient-to-r from-indigo-600 to-cyan-500 shadow-[0_8px_20px_rgba(79,70,229,0.28)] hover:from-indigo-500 hover:to-cyan-400 active:scale-[0.98] transition-all text-sm disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none'
             },
             {
                 optionsWrap: 'space-y-2',
@@ -407,8 +537,8 @@
                 analysisText: 'leading-snug text-slate-600 font-medium',
                 cardsWrap: 'space-y-2.5',
                 footer: 'flex justify-between items-center gap-2.5 mt-5 pt-4 pb-safe',
-                prevButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed',
-                nextButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed'
+                prevButton: 'px-7 py-2.5 rounded-xl font-bold border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 hover:border-slate-400 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed',
+                nextButton: 'px-7 py-2.5 rounded-xl font-bold text-white bg-gradient-to-r from-indigo-600 to-cyan-500 shadow-[0_8px_18px_rgba(79,70,229,0.26)] hover:from-indigo-500 hover:to-cyan-400 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none'
             },
             {
                 optionsWrap: 'space-y-1.5',
@@ -425,8 +555,8 @@
                 analysisText: 'leading-snug text-slate-600 font-medium',
                 cardsWrap: 'space-y-2',
                 footer: 'flex justify-between items-center gap-2 mt-4 pt-4 pb-safe',
-                prevButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed',
-                nextButton: 'px-7 py-2.5 bg-slate-900 text-white rounded-xl font-bold shadow-xl active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed'
+                prevButton: 'px-7 py-2.5 rounded-xl font-bold border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 hover:border-slate-400 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed',
+                nextButton: 'px-7 py-2.5 rounded-xl font-bold text-white bg-gradient-to-r from-indigo-600 to-cyan-500 shadow-[0_8px_18px_rgba(79,70,229,0.26)] hover:from-indigo-500 hover:to-cyan-400 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none'
             }
         ];
 
@@ -544,51 +674,6 @@
             return { status, wrongSelections, missedSelections, receivedText };
         }
 
-        function getFillAnswerFeedback(question, answerValue) {
-            const blankCount = getFillBlankCount(question);
-            const expected = getFillDraftValues(question?.ans, blankCount);
-            const received = getFillDraftValues(answerValue, blankCount);
-            let hasWrong = false;
-            let hasMissing = false;
-            const perBlank = [];
-            for (let idx = 0; idx < blankCount; idx += 1) {
-                const receivedValue = String(received[idx] ?? '').trim();
-                const expectedValue = String(expected[idx] ?? '').trim();
-                let blankStatus = '正确';
-                if (!receivedValue) {
-                    hasMissing = true;
-                    blankStatus = '少填';
-                } else if (normalizeFreeText(receivedValue) !== normalizeFreeText(expectedValue)) {
-                    hasWrong = true;
-                    blankStatus = '错填';
-                }
-                perBlank.push({
-                    index: idx + 1,
-                    status: blankStatus,
-                    received: receivedValue || '___',
-                    expected: expectedValue || '___'
-                });
-            }
-            const status = hasWrong && hasMissing
-                ? '错填+少填'
-                : (hasWrong ? '错填' : (hasMissing ? '少填' : '正确'));
-            const receivedText = received.map((item) => String(item ?? '').trim() || '___').join(' | ');
-            const detailText = perBlank
-                .map((item) => {
-                    if (item.status === '正确') return `第${item.index}空：正确`;
-                    if (item.status === '少填') return `第${item.index}空：未填写（应填：${item.expected}）`;
-                    return `第${item.index}空：填写“${item.received}”，应为“${item.expected}”`;
-                })
-                .join('；');
-            return {
-                status,
-                receivedText,
-                detailText,
-                blankCount,
-                showPerBlankDetail: blankCount > 1
-            };
-        }
-
         function getFillBlankCount(question) {
             const questionText = String(question?.q ?? question?.question ?? '');
             const matches = questionText.match(/[（(][^（）()]*[）)]/g);
@@ -668,15 +753,6 @@
             return String(userAnswer) === String(question.ans);
         }
 
-        function shouldAutoJudgeMultiple(question, selected) {
-            if (!(state.mode === 'browse' || state.mode === 'practice')) return false;
-            const expected = parseMultipleAnswerValue(question.ans);
-            const expectedSet = new Set(expected);
-            const hasWrongChoice = selected.some((idx) => !expectedSet.has(idx));
-            const isSelectionComplete = selected.length === expected.length;
-            return hasWrongChoice || isSelectionComplete;
-        }
-
         function renderAfterAnswerChange(questionIdx) {
             state.idx = questionIdx;
             renderQuestion({ animate: false });
@@ -684,8 +760,12 @@
 
         function commitAnswer(questionIdx, answerValue, renderNow = true) {
             const question = state.lib.questions[questionIdx];
-            if (!isAnswerCorrect(question, answerValue)) {
+            const isCorrect = isAnswerCorrect(question, answerValue);
+            if (!isCorrect) {
                 state.wrongAttempts[questionIdx] = true;
+            } else if (state.mode === 'exam') {
+                // 考试模式以当前最终输入为准，避免输入过程中的临时错误被永久标记
+                delete state.wrongAttempts[questionIdx];
             }
             state.answers[questionIdx] = answerValue;
             delete state.pendingAnswers[questionIdx];
@@ -700,7 +780,7 @@
 
             const pending = state.pendingAnswers[questionIdx];
             if (pending === undefined) {
-                if (qType === 'fill') {
+                if (qType === 'fill' && state.answers[questionIdx] === undefined) {
                     const blankCount = getFillBlankCount(question);
                     const parts = getFillDraftValues('', blankCount);
                     commitAnswer(questionIdx, parts.join('|'), false);
@@ -764,6 +844,12 @@
             }
 
             state.mode = targetMode;
+            if (targetMode === 'analysis') {
+                state.answers = buildAnalysisModeAnswers(state.lib?.questions || []);
+                state.pendingAnswers = {};
+                state.wrongAttempts = {};
+                state.practiceHints = {};
+            }
 
             if (previousMode === 'exam' && targetMode !== 'exam') {
                 clearInterval(state.timer);
@@ -918,6 +1004,7 @@
             resetMainScrollerPosition();
             closeModeSwitchMenu();
             updateModeSwitchUI();
+            syncQuizSessionClass();
             $('sidebar').classList.add('hidden');
             $('sidebar-trigger').classList.add('hidden');
             $('exam-timer').classList.add('hidden');
@@ -980,8 +1067,9 @@
             }
             
             state.lib = libraryDetails;
+            updateModeSwitchUI();
             const questionCount = state.lib.questions.length;
-            const introduction = (state.lib.description || '').trim() || `共 ${questionCount} 题。`;
+            const introduction = (state.lib.description || '').trim() || '暂无题集介绍';
             if (!skipHistorySync) syncUrlWithState({ libraryId: state.lib.id, mode: '' });
             
             $('main-view').innerHTML = `
@@ -990,7 +1078,7 @@
                     <div class="library-intro mb-5 rounded-2xl border border-slate-200/70 bg-white/90 shadow-sm p-5">
                         <h3 class="text-sm font-black text-slate-400 mb-2 tracking-widest">题集介绍</h3>
                         <p class="text-sm leading-relaxed text-slate-600">${introduction}</p>
-                        <p class="text-xs text-slate-400 mt-3">${questionCount} 题</p>
+                        <p class="text-xs text-slate-400 mt-3">题目数量：共 ${questionCount} 题</p>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <a href="${buildLibraryModeUrl(state.lib.id, 'browse')}" onclick="return openModeFromLink(event, 'browse')" class="mode-entry w-full p-4 sm:p-5 rounded-2xl border-2 border-transparent hover:border-indigo-500 text-left flex items-center gap-4">
@@ -1059,11 +1147,20 @@
         }
 
         function startMode(mode) {
-            state.mode = mode; state.idx = 0; state.answers = {}; state.pendingAnswers = {}; state.wrongAttempts = {}; state.isReview = false; state.practiceHints = {}; state.submitting = false; state.navMode = 'next';
+            state.mode = mode;
+            state.idx = 0;
+            state.answers = mode === 'analysis' ? buildAnalysisModeAnswers(state.lib?.questions || []) : {};
+            state.pendingAnswers = {};
+            state.wrongAttempts = {};
+            state.isReview = false;
+            state.practiceHints = {};
+            state.submitting = false;
+            state.navMode = 'next';
             clearInterval(state.timer);
             resetExamPanelUI();
             resetMainScrollerPosition();
             closeModeSwitchMenu();
+            syncQuizSessionClass();
             $('sidebar-trigger').classList.remove('hidden');
             const isMobile = window.innerWidth <= 768;
             $('sidebar').className = isMobile ? "flex bg-white flex-col" : "flex w-72 lg:w-80 border-r flex-col";
@@ -1117,7 +1214,6 @@
                 const selectedMulti = new Set(parseMultipleAnswerValue(currentAnswer));
                 const correctMulti = new Set(parseMultipleAnswerValue(q.ans));
                 const multiFeedback = qType === 'multiple' ? getMultipleAnswerFeedback(q, uAns) : null;
-                const fillFeedback = qType === 'fill' ? getFillAnswerFeedback(q, uAns) : null;
                 let contentHtml = '';
                 if (qType === 'fill') {
                     const readOnly = isAnalysisMode || state.isReview || isLockedAfterAnswer;
@@ -1156,6 +1252,7 @@
                     `;
                 } else {
                     const optionsHtml = (q.options || []).map((opt, i) => {
+                        const optionText = String(opt ?? '');
                         let cls = compact.optionCard;
                         if (qType === 'multiple') {
                             const isCorrectOption = correctMulti.has(i);
@@ -1172,11 +1269,11 @@
                             return `<label class="${cls} multi-option-row">
                                         <input type="checkbox" class="multi-option-checkbox" ${isSelectedOption ? 'checked' : ''} ${(isAnalysisMode || state.isReview || isLockedAfterAnswer) ? 'disabled' : ''} onchange="handleChoice(${i}, ${qIdx})">
                                         <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
-                                        ${opt}
+                                        ${optionText}
                                     </label>`;
                         } else {
                             if (isAnalysisMode) {
-                                if (String(i) === String(q.ans)) cls += " opt-right cursor-default";
+                                if (String(i) === String(selectedSingle)) cls += " opt-right cursor-default";
                                 else cls += " cursor-default";
                             } else if (state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered)) {
                                 if (String(i) === String(q.ans)) cls += " opt-right";
@@ -1188,7 +1285,7 @@
                         if (isLockedAfterAnswer) cls += " cursor-default";
                         return `<div onclick="handleChoice(${i}, ${qIdx})" class="${cls}">
                                     <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
-                                    ${opt}
+                                    ${optionText}
                                 </div>`;
                     }).join('');
                     const allSelected = (q.options || []).length > 0 && selectedMulti.size === (q.options || []).length;
@@ -1223,9 +1320,6 @@
 
                 if (showA) {
                     cardHtml += `<div class="${compact.analysisCard}"${getQuestionScaleStyle()}>
-                        ${(qType === 'fill' && fillFeedback) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(fillFeedback.receivedText)} · ${fillFeedback.status}</p>${fillFeedback.showPerBlankDetail ? `<p class="${compact.analysisText}">分空判断：${escapeHtml(fillFeedback.detailText)}</p>` : ''}` : ''}
-                        ${(qType === 'qa') ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(String(uAns ?? pendingAnswer ?? '未作答'))}</p>` : ''}
-                        ${(qType === 'multiple' && multiFeedback && (uAns !== undefined || state.isReview)) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(multiFeedback.receivedText)} · ${multiFeedback.status === 'correct' ? '正确' : multiFeedback.status}</p>` : ''}
                         <p class="${compact.analysisAnswer}">正确答案：${answerText}</p>
                         <p class="${compact.analysisText}">${q.analysis || '暂无解析'}</p>
                     </div>`;
@@ -1277,7 +1371,6 @@
             const selectedMulti = new Set(parseMultipleAnswerValue(currentAnswer));
             const correctMulti = new Set(parseMultipleAnswerValue(q.ans));
             const multiFeedback = qType === 'multiple' ? getMultipleAnswerFeedback(q, uAns) : null;
-            const fillFeedback = qType === 'fill' ? getFillAnswerFeedback(q, uAns) : null;
             let contentHtml = '';
             if (qType === 'fill') {
                 const readOnly = isAnalysisMode || state.isReview || isLockedAfterAnswer;
@@ -1316,6 +1409,7 @@
                 `;
             } else {
                 const optionsHtml = (q.options || []).map((opt, i) => {
+                    const optionText = String(opt ?? '');
                     let cls = compact.optionCard;
                     if (qType === 'multiple') {
                         const isCorrectOption = correctMulti.has(i);
@@ -1332,11 +1426,11 @@
                         return `<label class="${cls} multi-option-row">
                             <input type="checkbox" class="multi-option-checkbox" ${isSelectedOption ? 'checked' : ''} ${(isAnalysisMode || state.isReview || isLockedAfterAnswer) ? 'disabled' : ''} onchange="handleChoice(${i})">
                             <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
-                            ${opt}
+                            ${optionText}
                         </label>`;
                     } else {
                         if (isAnalysisMode) {
-                            if (String(i) === String(q.ans)) cls += " opt-right cursor-default";
+                            if (String(i) === String(selectedSingle)) cls += " opt-right cursor-default";
                             else cls += " cursor-default";
                         } else if (state.isReview || (state.mode === 'browse' && isAnswered) || (state.mode === 'practice' && isAnswered)) {
                             if (String(i) === String(q.ans)) cls += " opt-right";
@@ -1348,7 +1442,7 @@
                     if (isLockedAfterAnswer) cls += " cursor-default";
                     return `<div onclick="handleChoice(${i})" class="${cls}">
                         <span class="${compact.optionTag}" style="font-size:0.72em;">${String.fromCharCode(65+i)}</span>
-                        ${opt}
+                        ${optionText}
                     </div>`;
                 }).join('');
                 const allSelected = (q.options || []).length > 0 && selectedMulti.size === (q.options || []).length;
@@ -1386,16 +1480,13 @@
 
             if (showA) {
                 html += `<div class="${compact.analysisCard}"${getQuestionScaleStyle()}>
-                    ${(qType === 'fill' && fillFeedback) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(fillFeedback.receivedText)} · ${fillFeedback.status}</p>${fillFeedback.showPerBlankDetail ? `<p class="${compact.analysisText}">分空判断：${escapeHtml(fillFeedback.detailText)}</p>` : ''}` : ''}
-                    ${(qType === 'qa') ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(String(uAns ?? pendingAnswer ?? '未作答'))}</p>` : ''}
-                    ${(qType === 'multiple' && multiFeedback && (uAns !== undefined || state.isReview)) ? `<p class="${compact.analysisText}">你的答案：${escapeHtml(multiFeedback.receivedText)} · ${multiFeedback.status === 'correct' ? '正确' : multiFeedback.status}</p>` : ''}
                     <p class="${compact.analysisAnswer}">正确答案：${answerText}</p>
                     <p class="${compact.analysisText}">${q.analysis || '暂无解析'}</p>
                 </div>`;
             }
 
             html += `<div class="${compact.footer}">
-                        <button onclick="jumpTo(${state.idx - 1})" ${state.idx === 0 ? 'disabled' : ''} class="${compact.prevButton}">上题</button>
+                        <button onclick="jumpTo(${state.idx - 1})" ${state.idx === 0 ? 'disabled' : ''} class="${compact.prevButton}">上一题</button>
                         <button onclick="nextStep()" class="${compact.nextButton}">
                             ${nextButtonText}
                         </button>
@@ -1441,6 +1532,11 @@
             if (!question) return;
             const qType = getQuestionType(question);
             if (qType !== 'fill' && qType !== 'qa') return;
+            if (state.mode === 'exam') {
+                commitAnswer(questionIdx, String(value ?? ''), false);
+                updateNavState();
+                return;
+            }
             state.pendingAnswers[questionIdx] = String(value ?? '');
         }
 
@@ -1454,7 +1550,13 @@
                 : state.answers[questionIdx];
             const values = getFillDraftValues(existing, blankCount);
             values[blankIndex] = String(value ?? '');
-            state.pendingAnswers[questionIdx] = values.join('|');
+            const nextValue = values.join('|');
+            if (state.mode === 'exam') {
+                commitAnswer(questionIdx, nextValue, false);
+                updateNavState();
+                return;
+            }
+            state.pendingAnswers[questionIdx] = nextValue;
         }
 
         function toggleSelectAllMultiple(questionIdx = state.idx) {
@@ -1523,21 +1625,6 @@
             renderQuestion();
         }
 
-        async function restartCurrentSession() {
-            if (!state.lib || !state.mode || state.isReview) return;
-            const isExamMode = state.mode === 'exam';
-            const ok = await showConfirmDialog({
-                title: '确认重新开始',
-                message: isExamMode ? '将清空当前考试进度并重新计时，确定继续吗？' : '将清空当前作答进度并从第一题开始，确定继续吗？',
-                confirmText: '重新开始',
-                confirmType: 'danger'
-            });
-            if (!ok) return;
-            const mode = state.mode;
-            startMode(mode);
-            showNotice('已重新开始', 'success');
-        }
-
         function nextStep() {
             if (!finalizePendingAnswer(state.idx, { strict: true, showError: true })) return;
             if (state.idx < state.lib.questions.length - 1) jumpTo(state.idx + 1);
@@ -1548,6 +1635,10 @@
         function jumpTo(i) { 
             if (i >= 0 && i < state.lib.questions.length) { 
                 if (i !== state.idx && !finalizePendingAnswer(state.idx, { strict: true, showError: true })) return;
+                if (state.isReview && state.mode === 'exam') {
+                    $('nav-title').innerText = '答题进度';
+                    $('score-tag').classList.add('hidden');
+                }
                 state.idx = i; renderQuestion();
                 if (isPullNavMode()) {
                     const card = getQuestionCardElement(i);
@@ -1728,13 +1819,51 @@
             clearInterval(state.timer); await showLibrary(); 
         }
 
+        async function refreshHomeLibraryView() {
+            const btn = $('home-refresh-btn');
+            const originalDisabled = btn ? btn.disabled : false;
+            if (btn) btn.disabled = true;
+            try {
+                if (state.mode) {
+                    const hasProgress = Object.keys(state.answers).length > 0 || state.mode === 'exam';
+                    if (!state.isReview && hasProgress) {
+                        const ok = await showConfirmDialog({
+                            title: '确认刷新',
+                            message: '刷新后当前未交卷进度会丢失，确定继续吗？',
+                            confirmText: '刷新',
+                            confirmType: 'danger'
+                        });
+                        if (!ok) return;
+                    }
+                    window.location.reload();
+                    return;
+                }
+                if (!state.lib) {
+                    sessionStorage.removeItem(LIBRARIES_CACHE_KEY);
+                    await showLibrary({ skipHistorySync: true });
+                    showNotice('主页已刷新', 'success');
+                } else if (state.lib.id) {
+                    const detailCacheKey = `${LIBRARY_DETAIL_CACHE_PREFIX}${state.lib.id}`;
+                    sessionStorage.removeItem(detailCacheKey);
+                    await selectLib(state.lib.id, { skipHistorySync: true });
+                    showNotice('题集信息已刷新', 'success');
+                }
+            } finally {
+                if (btn) btn.disabled = originalDisabled;
+            }
+        }
+
         (async function() {
             syncViewportHeight();
             document.body.dataset.themePreference = getStoredThemePreference();
             syncThemeMode();
             syncDeviceProfileClass();
+            updateHomeRefreshButtonVisibility();
             if ($('theme-toggle')) {
                 $('theme-toggle').addEventListener('click', toggleThemeMode);
+            }
+            if ($('home-refresh-btn')) {
+                $('home-refresh-btn').addEventListener('click', refreshHomeLibraryView);
             }
             if ($('nav-mode-toggle')) {
                 $('nav-mode-toggle').addEventListener('click', toggleQuestionNavMode);
@@ -1816,6 +1945,7 @@
                 syncDeviceProfileClass();
                 syncSidebarForViewportChange();
             });
+            initTopActionsDragScroll();
             updateQuestionFontSizePreview();
             updateCompactnessPreview();
             const routeState = readRouteState();

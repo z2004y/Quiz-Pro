@@ -335,10 +335,31 @@
         }
         #library-list .library-compact-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
             gap: 0.55rem;
             width: 100%;
             justify-content: start;
+        }
+        #library-list .library-compact-item {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            min-width: 0;
+        }
+        #library-list .library-compact-check {
+            width: 1.5rem;
+            height: 2.35rem;
+            border-radius: 0.5rem;
+            border: 1px solid #e2e8f0;
+            background: #fff;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+        }
+        #library-list .library-compact-check input {
+            width: 0.95rem;
+            height: 0.95rem;
         }
         #library-list .library-compact-btn {
             min-height: 2.35rem;
@@ -351,6 +372,10 @@
             justify-content: center;
             gap: 0.35rem;
             width: 100%;
+        }
+        #library-list .library-compact-item .library-compact-btn {
+            flex: 1 1 auto;
+            min-width: 0;
         }
         #library-list .library-compact-btn:hover {
             border-color: #818cf8;
@@ -449,6 +474,13 @@
             flex: 1 1 10rem;
             min-width: 9rem;
             max-width: 16rem;
+        }
+        #library-batch-action {
+            min-width: 9rem;
+            max-width: 12rem;
+        }
+        #library-selected-hint {
+            white-space: nowrap;
         }
         #mobile-library-toggle-btn {
             transition: all 0.2s ease;
@@ -991,6 +1023,10 @@
             background: rgba(15, 23, 42, 0.9) !important;
             border-color: rgba(71, 85, 105, 0.72) !important;
             color: #e2e8f0 !important;
+        }
+        body.theme-dark #library-list .library-compact-check {
+            background: rgba(15, 23, 42, 0.9);
+            border-color: rgba(71, 85, 105, 0.72);
         }
         body.theme-dark #library-list button.bg-indigo-50 {
             background: rgba(79, 70, 229, 0.22) !important;

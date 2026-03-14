@@ -747,7 +747,7 @@ def extract_json_payload(text):
         return json.loads(snippet)
     raise ValueError('AI 返回不是有效 JSON')
 
-def call_openai_compatible_chat(settings, prompt):
+def call_openai_compatible_chat(settings, prompt, request_timeout=60):
     base_url = (settings.get('base_url') or '').strip().rstrip('/')
     endpoint_path = (settings.get('endpoint_path') or '').strip()
     if not base_url and not endpoint_path:
@@ -781,7 +781,8 @@ def call_openai_compatible_chat(settings, prompt):
     }
     req = urlrequest.Request(url, data=data, headers=headers, method='POST')
     try:
-        with urlrequest.urlopen(req, timeout=60) as resp:
+        timeout_seconds = max(5, int(request_timeout or 60))
+        with urlrequest.urlopen(req, timeout=timeout_seconds) as resp:
             raw = resp.read().decode('utf-8')
     except urlerror.HTTPError as exc:
         try:
@@ -909,9 +910,32 @@ def normalize_question_type(raw_type):
     key = str(raw_type or 'single').strip().lower()
     return QUESTION_TYPE_ALIASES.get(key, 'single')
 
+def strip_option_prefix(option_text):
+    text = str(option_text or '').strip()
+    if not text:
+        return ''
+    # 兼容并连续清理：A. / A、 / A) / A: / A： / A． / (A) / （A） 等前缀
+    # 示例：A、A. 选项内容 -> 选项内容
+    for _ in range(4):
+        next_text = re.sub(r'^[\(\[（【]\s*[A-Ha-h]\s*[\)\]）】]\s*', '', text)
+        next_text = re.sub(r'^[A-Ha-h]\s*[\.．、\):：]\s*', '', next_text)
+        next_text = next_text.strip()
+        if next_text == text:
+            break
+        text = next_text
+    return text
+
+def normalize_option_list(raw_options):
+    normalized = []
+    for option in (raw_options or []):
+        cleaned = strip_option_prefix(option)
+        if cleaned:
+            normalized.append(cleaned)
+    return normalized
+
 def parse_options(raw_options, allow_empty=False):
     if isinstance(raw_options, list):
-        options = [str(option).strip() for option in raw_options if str(option).strip()]
+        options = normalize_option_list(raw_options)
     elif isinstance(raw_options, str):
         text = raw_options.strip()
         if not text:
@@ -920,11 +944,11 @@ def parse_options(raw_options, allow_empty=False):
             try:
                 parsed = json.loads(text)
                 if isinstance(parsed, list):
-                    options = [str(option).strip() for option in parsed if str(option).strip()]
+                    options = normalize_option_list(parsed)
                 else:
-                    options = [line.strip() for line in text.splitlines() if line.strip()]
+                    options = normalize_option_list(text.splitlines())
             except json.JSONDecodeError:
-                options = [line.strip() for line in text.splitlines() if line.strip()]
+                options = normalize_option_list(text.splitlines())
     else:
         options = []
 
@@ -1079,6 +1103,7 @@ def serialize_question(question_row):
         options = json.loads(question_row['options'])
     except (TypeError, json.JSONDecodeError):
         options = []
+    options = options if isinstance(options, list) else []
     question_type = normalize_question_type(question_row['type'])
     answer_raw = question_row['answer']
     answer = parse_stored_multiple_answer(answer_raw) if question_type == 'multiple' else answer_raw
@@ -1108,6 +1133,7 @@ def serialize_question_for_export(question_row):
         options = json.loads(question_row['options'])
     except (TypeError, json.JSONDecodeError):
         options = []
+    options = options if isinstance(options, list) else []
     question_type = normalize_question_type(question_row['type'])
     answer_raw = question_row['answer']
     answer = parse_stored_multiple_answer(answer_raw) if question_type == 'multiple' else answer_raw
@@ -2090,6 +2116,84 @@ def admin_delete_library(lib_id):
 
     return jsonify({'message': '题集已删除'})
 
+# 管理后台：批量操作题集
+@app.route('/api/admin/libraries/batch', methods=['POST'])
+@require_admin_auth
+def admin_batch_libraries():
+    data = request.get_json(silent=True) or {}
+    raw_ids = data.get('library_ids')
+    action = str(data.get('action') or '').strip()
+
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return jsonify({'error': 'library_ids 必须是非空数组'}), 400
+    if action not in ('delete', 'set-public', 'set-private'):
+        return jsonify({'error': '不支持的批量操作'}), 400
+
+    library_ids = []
+    seen_ids = set()
+    for item in raw_ids:
+        lib_id = str(item or '').strip()
+        if not lib_id or lib_id in seen_ids:
+            continue
+        seen_ids.add(lib_id)
+        library_ids.append(lib_id)
+
+    if not library_ids:
+        return jsonify({'error': '没有有效的题集 ID'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        placeholders = ','.join(['?'] * len(library_ids))
+        cursor.execute(
+            f'SELECT id FROM libraries WHERE id IN ({placeholders})',
+            tuple(library_ids)
+        )
+        existing_ids = [row['id'] for row in cursor.fetchall()]
+        if not existing_ids:
+            conn.close()
+            return jsonify({'error': '未找到可操作的题集'}), 404
+
+        existing_placeholders = ','.join(['?'] * len(existing_ids))
+        if action == 'delete':
+            params = tuple(existing_ids)
+            cursor.execute(f'DELETE FROM user_answers WHERE library_id IN ({existing_placeholders})', params)
+            cursor.execute(f'DELETE FROM questions WHERE library_id IN ({existing_placeholders})', params)
+            cursor.execute(f'DELETE FROM libraries WHERE id IN ({existing_placeholders})', params)
+            affected_count = len(existing_ids)
+            conn.commit()
+            invalidate_public_library_cache()
+            conn.close()
+            return jsonify({
+                'message': f'已删除 {affected_count} 个题集',
+                'action': action,
+                'requested_count': len(library_ids),
+                'affected_count': affected_count,
+                'library_ids': existing_ids
+            })
+
+        is_public = 1 if action == 'set-public' else 0
+        cursor.execute(
+            f'UPDATE libraries SET is_public = ? WHERE id IN ({existing_placeholders})',
+            (is_public, *existing_ids)
+        )
+        affected_count = int(cursor.rowcount) if isinstance(cursor.rowcount, int) and cursor.rowcount >= 0 else len(existing_ids)
+        conn.commit()
+        invalidate_public_library_cache()
+        conn.close()
+        return jsonify({
+            'message': f'已更新 {affected_count} 个题集可见性',
+            'action': action,
+            'requested_count': len(library_ids),
+            'affected_count': affected_count,
+            'library_ids': existing_ids,
+            'is_public': bool(is_public)
+        })
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        return jsonify({'error': f'批量操作失败: {exc}'}), 500
+
 # 管理后台：新增题目
 @app.route('/api/admin/libraries/<lib_id>/questions', methods=['POST'])
 @require_admin_auth
@@ -2814,7 +2918,7 @@ def admin_ai_collect_from_file():
     prompt = build_ai_collect_prompt(source_text, library_title or 'AI 采集题库', library_id or '')
 
     try:
-        ai_text = call_openai_compatible_chat(settings, prompt)
+        ai_text = call_openai_compatible_chat(settings, prompt, request_timeout=180)
         payload = extract_json_payload(ai_text)
         libraries = extract_import_libraries(payload)
         if isinstance(payload, list) or (isinstance(payload, dict) and 'libraries' not in payload):
@@ -2977,6 +3081,20 @@ def admin_delete_collector_record(record_id):
     conn.commit()
     conn.close()
     return jsonify({'message': '采集记录已删除'})
+
+@app.route('/api/admin/collector-records/clear', methods=['DELETE'])
+@require_admin_auth
+def admin_clear_collector_records():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) AS total FROM collector_records')
+    row = cursor.fetchone()
+    total = int((row['total'] if row else 0) or 0)
+    if total > 0:
+        cursor.execute('DELETE FROM collector_records')
+        conn.commit()
+    conn.close()
+    return jsonify({'message': f'已清空 {total} 条采集记录', 'deleted_count': total})
 
 @app.route('/api/admin/query', methods=['POST'])
 def admin_push_collector_record():
