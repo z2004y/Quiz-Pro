@@ -25,8 +25,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IS_VERCEL = bool(os.environ.get('VERCEL')) or bool(os.environ.get('VERCEL_REGION'))
 DEFAULT_SQLITE_PATH = os.path.join(BASE_DIR, 'quiz.db')
 DEFAULT_AI_SETTINGS_PATH = os.path.join(BASE_DIR, 'ai_settings.json')
-DB_PATH = os.environ.get('DB_PATH', DEFAULT_SQLITE_PATH)
-AI_SETTINGS_PATH = os.environ.get('AI_SETTINGS_PATH', DEFAULT_AI_SETTINGS_PATH)
+
+def resolve_runtime_path(path_value, default_path):
+    value = str(path_value or '').strip()
+    if not value:
+        return default_path
+    if os.path.isabs(value):
+        return value
+    return os.path.abspath(os.path.join(BASE_DIR, value))
+
+DB_PATH = resolve_runtime_path(os.environ.get('DB_PATH'), DEFAULT_SQLITE_PATH)
+AI_SETTINGS_PATH = resolve_runtime_path(os.environ.get('AI_SETTINGS_PATH'), DEFAULT_AI_SETTINGS_PATH)
 DB_BACKEND = (os.environ.get('DB_BACKEND') or '').strip().lower()
 if not DB_BACKEND:
     DB_BACKEND = 'mysql' if os.environ.get('MYSQL_HOST') else 'sqlite'
